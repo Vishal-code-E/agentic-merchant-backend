@@ -1,0 +1,52 @@
+{
+  "name": "backend",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "application",
+  "sourceRoot": "apps/backend/app",
+  "tags": ["scope:backend", "type:app", "lang:python"],
+  "targets": {
+    "install": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "pip install -r requirements.txt --break-system-packages",
+        "cwd": "apps/backend"
+      }
+    },
+    "serve": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "uvicorn app.main:app --reload --host 0.0.0.0 --port 8000",
+        "cwd": "apps/backend"
+      }
+    },
+    "build": {
+      "executor": "nx:run-commands",
+      "outputs": ["{projectRoot}/dist"],
+      "options": {
+        "command": "docker build -f ../../infra/Dockerfile.backend -t agentic-merchant-backend:latest ../..",
+        "cwd": "apps/backend"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "pytest",
+        "cwd": "apps/backend"
+      }
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "ruff check app",
+        "cwd": "apps/backend"
+      }
+    },
+    "migrate": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "alembic upgrade head",
+        "cwd": "apps/backend"
+      }
+    }
+  }
+}

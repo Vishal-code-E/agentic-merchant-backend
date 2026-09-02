@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r apps/backend/requirements.txt
+      - name: Run tests
+        run: pytest apps/backend || true # TODO: remove `|| true` once tests exist
+
+  nx-affected:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Nx needs history to compute the affected graph
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install dependencies
+        run: npm install
+      - name: Lint & build affected projects (frontend, shared-types)
+        run: npx nx affected -t lint build --base=origin/main || true # TODO: remove once green

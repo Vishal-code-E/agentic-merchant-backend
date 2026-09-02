@@ -1,0 +1,31 @@
+{
+  "name": "agentic-merchant-backend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "serve:backend": "nx serve backend",
+    "serve:frontend": "nx dev frontend",
+    "test:backend": "nx test backend",
+    "build": "nx run-many -t build",
+    "test": "nx run-many -t test",
+    "lint": "nx run-many -t lint",
+    "graph": "nx graph",
+    "affected:test": "nx affected -t test",
+    "affected:build": "nx affected -t build"
+  },
+  "devDependencies": {
+    "nx": "^20.0.0",
+    "@nx/next": "^20.0.0",
+    "@nx/js": "^20.0.0",
+    "@nx/eslint": "^20.0.0",
+    "@nx/workspace": "^20.0.0",
+    "typescript": "^5.5.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.0"
+  },
+  "dependencies": {
+    "next": "^15.0.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0"
+  }
+}
