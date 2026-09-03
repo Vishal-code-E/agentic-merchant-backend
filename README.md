@@ -68,6 +68,20 @@ cp .env.example .env
 # fill in Razorpay TEST-mode keys, DB URL, Langfuse keys, model provider key
 ```
 
+Postgres is [Neon](https://neon.tech) (cloud-managed), not a local/Docker
+container:
+
+1. Create a Neon project and copy its connection string from the project
+   dashboard → **Connection Details**.
+2. Convert it into `.env`'s `DATABASE_URL`: use the `postgresql+asyncpg://`
+   scheme (not the raw `psql` string) and drop any `channel_binding` query
+   param — asyncpg doesn't support it.
+3. Create the schema by running Alembic locally (not inside Docker):
+   ```bash
+   cd apps/backend
+   alembic upgrade head
+   ```
+
 ### 2. Install the Nx workspace (frontend + shared-types)
 
 ```bash
@@ -79,6 +93,9 @@ npm install
 ```bash
 docker compose -f infra/docker-compose.yml up --build
 ```
+
+This now only starts `backend`, `frontend`, and `redis` — Postgres lives on
+Neon, outside Docker entirely.
 
 - Backend: http://localhost:8000/ping
 - Backend docs: http://localhost:8000/docs

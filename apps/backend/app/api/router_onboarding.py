@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
 from app.models.merchant import Merchant
 from app.schemas.merchant import MerchantResponse, OnboardMerchantRequest, OnboardMerchantResponse
+from app.services.encryption import encrypt_secret
 from app.services.razorpay_client import RazorpayClient
 
 router = APIRouter(tags=["onboarding"])
@@ -23,7 +24,7 @@ async def set_razorpay_keys(
     merchant = Merchant(
         name=payload.name,
         razorpay_key_id=payload.razorpay_key_id,
-        razorpay_key_secret=payload.razorpay_key_secret,
+        razorpay_key_secret=encrypt_secret(payload.razorpay_key_secret),
         status="active" if keys_valid else "pending",
     )
     db.add(merchant)

@@ -7,7 +7,7 @@ See /.env.example at repo root for the full variable list.
 """
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -49,6 +49,20 @@ class Settings(BaseSettings):
 
     # --- Security ---
     secret_key: str = Field(default="change-me-in-prod")
+    # Fernet key used to encrypt merchant Razorpay secrets at rest. No default —
+    # must fail at startup in prod rather than silently storing plaintext.
+    encryption_key: str = Field(default="")
+
+    @model_validator(mode="after")
+    def _require_encryption_key_in_prod(self) -> "Settings":
+        if self.app_env == "prod" and not self.encryption_key:
+            raise ValueError(
+                "ENCRYPTION_KEY must be set in prod (used to encrypt merchant "
+                "Razorpay secrets at rest). Generate one with: "
+                "python -c \"from cryptography.fernet import Fernet; "
+                "print(Fernet.generate_key().decode())\""
+            )
+        return self
 
 
 @lru_cache

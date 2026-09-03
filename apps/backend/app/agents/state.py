@@ -9,7 +9,10 @@ class CheckoutState(TypedDict, total=False):
     constraints: dict[str, Any]
     upsell_suggestions: list[dict[str, Any]] | None
     policy_result: dict[str, Any] | None
+    order_id: str | None
     razorpay_order_id: str | None
+    amount: float | None
+    currency: str | None
     status: str  # pending | success | failed
     explanation: str | None
 
