@@ -47,6 +47,35 @@ export interface Policy {
   perUserLimit: number | null;
 }
 
+/** Request body for PATCH /merchant/{merchantId}/policy — partial update. */
+export interface PolicyUpdate {
+  maxAmount?: number;
+  allowedCategories?: string[];
+  perUserLimit?: number;
+}
+
+/**
+ * Request body for POST /merchant/onboarding/keys.
+ * NOTE: this endpoint is snake_case on the wire — unlike /agent/* and the
+ * policy endpoints, OnboardMerchantRequest/MerchantResponse have no camelCase
+ * alias generator. See docs/03-dev-handoff-architecture-lld.md (casing drift,
+ * left as known tech debt).
+ */
+export interface OnboardMerchantRequest {
+  name: string;
+  razorpay_key_id: string;
+  razorpay_key_secret: string;
+  max_amount: number;
+  allowed_categories: string[];
+  per_user_limit?: number | null;
+}
+
+export interface OnboardMerchantResponse {
+  merchant: Merchant;
+  policy: Policy;
+  keys_valid: boolean;
+}
+
 export type AgentRunType = "checkout" | "campaign";
 export type AgentRunStatus = "running" | "success" | "failed";
 
