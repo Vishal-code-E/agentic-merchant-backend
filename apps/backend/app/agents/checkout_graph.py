@@ -18,8 +18,9 @@ from app.models.merchant import Merchant
 from app.models.order import Order
 from app.models.policy import Policy
 from app.models.product import Product
+from app.services.audit_service import AuditService
 from app.services.encryption import decrypt_secret
-from app.services.policy_engine import PolicyEngine
+from app.services.policy_engine import PolicyEngine, cart_total
 from app.services.razorpay_client import RazorpayClient
 
 #: Total upsell suggestions returned per checkout, across all cart categories.
@@ -30,6 +31,7 @@ async def input_node(state: CheckoutState) -> CheckoutState:
     """Fill in CheckoutState defaults around the router-supplied request fields."""
     state.setdefault("customer_context", None)
     state.setdefault("constraints", {})
+    state.setdefault("agent_run_id", None)
     state.setdefault("upsell_suggestions", None)
     state.setdefault("policy_result", None)
     state.setdefault("order_id", None)
@@ -220,6 +222,29 @@ async def check_policy_node(state: CheckoutState, db: AsyncSession) -> CheckoutS
         "notes": decision.notes + upsell_notes,
     }
 
+    # Evidence for the gate itself, independent of allow/deny — logged every
+    # time evaluate() actually runs (the policy_missing early-return above
+    # never reaches here; router_checkout writes its own audit row for that
+    # case instead, since there's no PolicyEngine decision to report).
+    audit_payload = {
+        "cart_total": cart_total(cart_items),
+        "policy_id": str(policy_row.id),
+        # policy["max_amount"] is a Decimal off the ORM column — JSONB storage
+        # (via asyncpg's json.dumps-based codec) can't serialize Decimal.
+        "max_amount": float(policy["max_amount"]) if policy["max_amount"] is not None else None,
+        "allowed_categories": policy["allowed_categories"],
+        "decision": decision.allowed,
+        "reason": decision.reason,
+    }
+    if policy["per_user_limit"] is not None:
+        audit_payload["per_user_limit_check"] = "best_effort_no_ledger"
+
+    await AuditService(db).log_event(
+        agent_run_id=state.get("agent_run_id"),
+        event_type="policy_check",
+        payload=audit_payload,
+    )
+
     if not decision.allowed:
         state["status"] = "failed"
         state["failure_stage"] = "policy"
@@ -232,7 +257,8 @@ async def create_order_node(state: CheckoutState, db: AsyncSession) -> CheckoutS
     """
     Create a local Order row, then call RazorpayClient.create_order() using the
     Order's own id as the receipt (idempotency key). Razorpay SDK errors are
-    left to propagate so the router can map them to a 502.
+    left to propagate so the router can map them to a 502 — but are audited
+    (event_type="razorpay_order_failed") before they're re-raised.
     """
     merchant = await db.get(Merchant, uuid.UUID(state["merchant_id"]))
     if merchant is None:
@@ -255,19 +281,46 @@ async def create_order_node(state: CheckoutState, db: AsyncSession) -> CheckoutS
     await db.flush()
     await db.refresh(order)
 
+    audit_service = AuditService(db)
     client = RazorpayClient(merchant.razorpay_key_id, decrypt_secret(merchant.razorpay_key_secret))
     amount_paise = int(round(amount * 100))
 
-    razorpay_order = await client.create_order(
-        amount_paise=amount_paise,
-        currency=currency,
-        receipt=str(order.id),
-        notes={"merchant_id": str(merchant.id), "order_id": str(order.id)},
-    )
+    try:
+        razorpay_order = await client.create_order(
+            amount_paise=amount_paise,
+            currency=currency,
+            receipt=str(order.id),
+            notes={"merchant_id": str(merchant.id), "order_id": str(order.id)},
+        )
+    except Exception as e:
+        order.status = "failed"
+        await db.flush()
+        await audit_service.log_event(
+            agent_run_id=state.get("agent_run_id"),
+            event_type="razorpay_order_failed",
+            payload={
+                "order_id": str(order.id),
+                "amount": amount,
+                "currency": currency,
+                "error": str(e),
+            },
+        )
+        raise
 
     order.razorpay_order_id = razorpay_order["id"]
     order.status = "success"
     await db.flush()
+
+    await audit_service.log_event(
+        agent_run_id=state.get("agent_run_id"),
+        event_type="razorpay_order_created",
+        payload={
+            "order_id": str(order.id),
+            "razorpay_order_id": order.razorpay_order_id,
+            "amount": amount,
+            "currency": currency,
+        },
+    )
 
     state["order_id"] = str(order.id)
     state["razorpay_order_id"] = order.razorpay_order_id

@@ -39,7 +39,9 @@ class Settings(BaseSettings):
     # --- Observability ---
     langfuse_public_key: str = Field(default="")
     langfuse_secret_key: str = Field(default="")
-    langfuse_host: str = Field(default="https://cloud.langfuse.com")
+    # Matches the Python SDK v4 env var (LANGFUSE_BASE_URL) and constructor
+    # kwarg (base_url) — the older LANGFUSE_HOST/host naming is SDK v2-era.
+    langfuse_base_url: str = Field(default="https://cloud.langfuse.com")
 
     # --- Model provider (universal abstraction; config-driven) ---
     model_provider: str = Field(default="anthropic")  # anthropic | openai | gemini

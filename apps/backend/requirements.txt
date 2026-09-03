@@ -9,7 +9,11 @@ alembic>=1.13
 redis>=5.0
 celery>=5.4
 langgraph>=0.2
-langfuse>=2.40
+# v3 introduced the OpenTelemetry-based API (get_client, observe,
+# propagate_attributes, langfuse.langchain.CallbackHandler); this app is
+# written against that surface (currently resolves to v4, the installed
+# version — see app/observability/langfuse_client.py).
+langfuse>=3.0
 razorpay>=1.4
 cryptography>=43.0
 python-dotenv>=1.0
