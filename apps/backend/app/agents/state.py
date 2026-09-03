@@ -14,6 +14,11 @@ class CheckoutState(TypedDict, total=False):
     amount: float | None
     currency: str | None
     status: str  # pending | success | failed
+    #: Which node set status="failed". The router maps this to an HTTP status,
+    #: since a policy denial and a bad cart are both status="failed" but are
+    #: 403 and 400 respectively.
+    #: validate_cart | policy | policy_missing | create_order
+    failure_stage: str | None
     explanation: str | None
 
 

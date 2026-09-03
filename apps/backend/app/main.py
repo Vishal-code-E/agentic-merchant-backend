@@ -8,6 +8,7 @@ from app.api import (
     router_checkout,
     router_observability,
     router_onboarding,
+    router_policy,
 )
 from app.config.settings import get_settings
 from app.db.session import engine
@@ -47,4 +48,5 @@ async def health_db():
 app.include_router(router_onboarding.router, prefix=settings.api_v1_prefix)
 app.include_router(router_catalog.router, prefix=settings.api_v1_prefix)
 app.include_router(router_checkout.router, prefix=settings.api_v1_prefix)
+app.include_router(router_policy.router, prefix=settings.api_v1_prefix)
 app.include_router(router_observability.router, prefix=settings.api_v1_prefix)
