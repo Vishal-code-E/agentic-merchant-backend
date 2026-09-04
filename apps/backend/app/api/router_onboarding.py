@@ -39,8 +39,8 @@ async def set_razorpay_keys(
     The plaintext agent API key exists only in this function's local variable
     and in the response below — only its sha256 hash is ever persisted (see
     app/services/agent_auth.py) — so it cannot be recovered if the caller
-    loses it; they would need to re-onboard (or a future key-rotation
-    endpoint) to get a new one.
+    loses it; they would need to call regenerate_api_key() below to get a
+    new one.
     """
     client = RazorpayClient(payload.razorpay_key_id, payload.razorpay_key_secret)
     keys_valid = await client.validate_keys()

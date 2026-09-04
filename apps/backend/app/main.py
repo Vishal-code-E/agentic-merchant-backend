@@ -38,6 +38,16 @@ async def lifespan(app: FastAPI):
         )
 
     yield
+
+    # Flush + shutdown the Langfuse OTel exporter so any spans still in the
+    # in-memory batch are sent before the process exits. Without this, every
+    # span produced by a process killed via SIGTERM (uvicorn restart, test
+    # teardown, Ctrl-C) is silently dropped — spans batch in memory and the
+    # SDK never gets a chance to export them. shutdown() calls flush() first,
+    # then tears down the TracerProvider cleanly.
+    await asyncio.to_thread(langfuse.shutdown)
+    logger.info("Langfuse shutdown complete — all buffered spans flushed.")
+
     await engine.dispose()
 
 
@@ -61,7 +71,7 @@ app.add_middleware(
 
 @app.get("/ping", tags=["health"])
 async def ping():
-    """Simple liveness check — the one endpoint in this skeleton that actually works."""
+    """Simple liveness check."""
     return {"status": "ok", "app": settings.app_name, "env": settings.app_env}
 
 

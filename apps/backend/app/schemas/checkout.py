@@ -33,3 +33,19 @@ class CheckoutResponse(BaseModel):
     currency: str
     upsell_suggestions: list[ProductResponse] = Field(default_factory=list)
     explanation: str
+
+
+class ChatCheckoutRequest(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    message: str
+    merchant_id: uuid.UUID
+    customer_context: dict[str, Any] | None = None
+
+
+class ChatCheckoutResponse(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    interpretation: str
+    checkout_result: CheckoutResponse | None = None
+    matched: bool

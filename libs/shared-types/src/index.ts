@@ -9,10 +9,11 @@
 
 export type MerchantStatus = "pending" | "active" | "disabled";
 
+// snake_case: MerchantResponse has no camelCase alias generator (see OnboardMerchantRequest note below).
 export interface Merchant {
   id: string;
   name: string;
-  razorpayKeyId: string | null;
+  razorpay_key_id: string | null;
   status: MerchantStatus;
 }
 
@@ -154,4 +155,25 @@ export interface CheckoutResponse {
   currency: string;
   upsellSuggestions: Product[];
   explanation: string;
+}
+
+/**
+ * Request body for POST /agent/chat-checkout. Same auth header as
+ * CheckoutRequest (AgentAuthHeader); Idempotency-Key is accepted but
+ * optional here — omitting it means the server generates one per call, so a
+ * retried message is NOT idempotent unless the caller supplies its own key.
+ */
+export interface ChatCheckoutRequest {
+  message: string;
+  merchantId: string;
+  customerContext?: Record<string, unknown>;
+}
+
+export interface ChatCheckoutResponse {
+  /** One-line human-readable interpretation of the message (or why it didn't match). */
+  interpretation: string;
+  /** Same shape as CheckoutResponse from POST /agent/checkout; null when matched is false. */
+  checkoutResult: CheckoutResponse | null;
+  /** False when no confident in-catalog match was found — a 200, not an error. */
+  matched: boolean;
 }

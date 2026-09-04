@@ -11,6 +11,8 @@ it doubles as a live demo, not just a smoke test:
     3. Builds a compliant cart and checks out (POST /agent/checkout) — success case
     4. Builds a cart that deliberately exceeds max_amount and checks out again
        — failure case, prints the policy denial reason
+    5. Tries a free-text conversational checkout (POST /agent/chat-checkout) —
+       one message that maps to a real product, one that doesn't (matched=false)
 
 Every /agent/* call carries an X-Agent-Api-Key header (required on both
 /agent/catalog and /agent/checkout), and every checkout additionally carries
@@ -169,6 +171,47 @@ def main() -> int:
     else:
         print("⚠️  Expected a denial but checkout succeeded — policy may be more permissive than assumed.")
         print(f"   {resp.json()}")
+    print()
+
+    # --- Conversational checkout: a message the catalog can satisfy ----------
+    print("💬 Conversational checkout: a message that maps to a real product...")
+    chat_message = f"1x {product['name']}"
+    print(f"   Message: {chat_message!r}")
+    resp = client.post(
+        f"{api}/agent/chat-checkout",
+        json={
+            "merchant_id": args.merchant_id,
+            "message": chat_message,
+            "customer_context": {"customer_id": "demo-buyer-agent"},
+        },
+    )
+    if resp.status_code >= 400:
+        print(f"❌ Unexpected error: {_error_detail(resp)}")
+    else:
+        chat_result = resp.json()
+        print(f"   Interpretation: {chat_result.get('interpretation')}")
+        if chat_result.get("matched"):
+            order = chat_result.get("checkoutResult") or {}
+            print(f"✅ Order created: {order.get('razorpayOrderId')} — {order.get('amount')} {order.get('currency')}")
+        else:
+            print("   No confident match (matched=false) — a valid outcome, not an error.")
+    print()
+
+    # --- Conversational checkout: a message the catalog can't satisfy --------
+    print("💬 Conversational checkout: a message nothing in the catalog can satisfy...")
+    resp = client.post(
+        f"{api}/agent/chat-checkout",
+        json={
+            "merchant_id": args.merchant_id,
+            "message": "buy me a spaceship",
+            "customer_context": {"customer_id": "demo-buyer-agent"},
+        },
+    )
+    if resp.status_code >= 400:
+        print(f"❌ Unexpected error: {_error_detail(resp)}")
+    else:
+        chat_result = resp.json()
+        print(f"   matched={chat_result.get('matched')} — {chat_result.get('interpretation')}")
 
     return 0
 

@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from datetime import datetime, timezone
 
@@ -32,9 +33,10 @@ async def run_campaign(payload: CampaignRunRequest, db: AsyncSession = Depends(g
     not one of several related traces (unlike a multi-turn conversation),
     so there's nothing for a Langfuse session to group.
     """
-    trace_id = langfuse.get_current_trace_id()
-
     with propagate_attributes(trace_name="run-campaign", tags=["campaign"]):
+        # get_current_trace_id() must be called inside propagate_attributes so
+        # the OTel span is active and the ID is non-None — same as router_checkout.
+        trace_id = langfuse.get_current_trace_id()
         langfuse.update_current_span(
             input={"merchant_id": str(payload.merchant_id), "window_hours": payload.window_hours}
         )
@@ -68,6 +70,7 @@ async def run_campaign(payload: CampaignRunRequest, db: AsyncSession = Depends(g
             agent_run.ended_at = datetime.now(timezone.utc)
             await db.commit()
             langfuse.update_current_span(output={"status": "failed", "error": str(e)})
+            await asyncio.to_thread(langfuse.flush)
             raise
 
         agent_run.status = "success"
@@ -76,5 +79,6 @@ async def run_campaign(payload: CampaignRunRequest, db: AsyncSession = Depends(g
 
         actions = result.get("actions") or []
         langfuse.update_current_span(output={"status": "success", "action_count": len(actions)})
+        await asyncio.to_thread(langfuse.flush)
 
         return CampaignRunResponse(actions=actions)

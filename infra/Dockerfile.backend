@@ -8,6 +8,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY apps/backend/app ./app
 COPY apps/backend/alembic ./alembic
 COPY apps/backend/alembic.ini .
+# Demo scripts (docs/DEMO.md) — lets a reviewer `docker compose exec backend
+# python scripts/ai_buyer_demo.py` without a separate local Python env.
+COPY apps/backend/scripts ./scripts
 
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
