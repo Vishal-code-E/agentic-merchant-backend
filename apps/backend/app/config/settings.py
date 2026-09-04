@@ -7,7 +7,7 @@ See /.env.example at repo root for the full variable list.
 """
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -39,7 +39,10 @@ class Settings(BaseSettings):
     # --- Observability ---
     langfuse_public_key: str = Field(default="")
     langfuse_secret_key: str = Field(default="")
-    langfuse_host: str = Field(default="https://cloud.langfuse.com")
+    # Matches the Python SDK v4 env var (LANGFUSE_BASE_URL) and constructor
+    # kwarg (base_url) — the older LANGFUSE_HOST/host naming is SDK v2-era.
+    langfuse_base_url: str = Field(default="https://cloud.langfuse.com")
+    data_retention_days: int = Field(default=90, description="Retention window for audit logs and agent runs in days")
 
     # --- Model provider (universal abstraction; config-driven) ---
     model_provider: str = Field(default="anthropic")  # anthropic | openai | gemini
@@ -47,8 +50,33 @@ class Settings(BaseSettings):
     openai_api_key: str = Field(default="")
     gemini_api_key: str = Field(default="")
 
+    # --- CORS ---
+    # Comma-separated list of origins allowed to call the API from a browser
+    # (see app/main.py's CORSMiddleware). Defaults to just the local frontend
+    # dev server so this isn't hardcoded for production later.
+    cors_allowed_origins: str = Field(default="http://localhost:3000")
+
     # --- Security ---
     secret_key: str = Field(default="change-me-in-prod")
+    # Fernet key used to encrypt merchant Razorpay secrets at rest. No default —
+    # must fail at startup in prod rather than silently storing plaintext.
+    encryption_key: str = Field(default="")
+
+    @property
+    def cors_allowed_origins_list(self) -> list[str]:
+        """cors_allowed_origins, split on commas and trimmed, for CORSMiddleware(allow_origins=...)."""
+        return [origin.strip() for origin in self.cors_allowed_origins.split(",") if origin.strip()]
+
+    @model_validator(mode="after")
+    def _require_encryption_key_in_prod(self) -> "Settings":
+        if self.app_env == "prod" and not self.encryption_key:
+            raise ValueError(
+                "ENCRYPTION_KEY must be set in prod (used to encrypt merchant "
+                "Razorpay secrets at rest). Generate one with: "
+                "python -c \"from cryptography.fernet import Fernet; "
+                "print(Fernet.generate_key().decode())\""
+            )
+        return self
 
 
 @lru_cache

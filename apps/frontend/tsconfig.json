@@ -8,13 +8,22 @@
     "isolatedModules": true,
     "noEmit": true,
     "incremental": true,
-    "plugins": [{ "name": "next" }]
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ]
   },
   "include": [
-    "next-env.d.ts",
     "**/*.ts",
     "**/*.tsx",
-    "../../libs/shared-types/src/index.ts"
+    "../../libs/shared-types/src/index.ts",
+    ".next/types/**/*.ts",
+    "next-env.d.ts",
+    "../../apps/frontend/.next/types/**/*.ts"
   ],
-  "exclude": ["node_modules", ".next"]
+  "exclude": [
+    "node_modules",
+    ".next"
+  ]
 }

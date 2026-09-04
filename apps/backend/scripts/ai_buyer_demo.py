@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""
+Standalone demo script that plays the role of an external AI shopping agent.
+
+It talks to the API exactly like any third-party agent integration would —
+plain HTTP calls via httpx, no imports from `app` — and narrates each step so
+it doubles as a live demo, not just a smoke test:
+
+    1. Discovers the merchant's catalog (GET /agent/catalog)
+    2. Checks the merchant's policy, to know what a compliant cart looks like
+    3. Builds a compliant cart and checks out (POST /agent/checkout) — success case
+    4. Builds a cart that deliberately exceeds max_amount and checks out again
+       — failure case, prints the policy denial reason
+    5. Tries a free-text conversational checkout (POST /agent/chat-checkout) —
+       one message that maps to a real product, one that doesn't (matched=false)
+
+Every /agent/* call carries an X-Agent-Api-Key header (required on both
+/agent/catalog and /agent/checkout), and every checkout additionally carries
+a fresh Idempotency-Key header (required; a missing one gets a 400) — see
+GET /.well-known/agent-manifest.json for the full contract.
+
+Usage:
+    python scripts/ai_buyer_demo.py --merchant-id <uuid> --api-key <key> \
+        [--base-url http://localhost:8000]
+
+Or via env vars:
+    MERCHANT_ID=<uuid> AGENT_API_KEY=<key> BASE_URL=http://localhost:8000 \
+        python scripts/ai_buyer_demo.py
+
+Get a merchant_id + api_key by onboarding one first: POST
+/merchant/onboarding/keys, or the /onboarding dashboard page. The api_key is
+returned once, at onboarding time, and never shown again.
+"""
+from __future__ import annotations
+
+import argparse
+import math
+import os
+import sys
+import uuid
+
+import httpx
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Demo an AI shopping agent discovering a catalog and checking out.",
+    )
+    parser.add_argument(
+        "--merchant-id",
+        default=os.environ.get("MERCHANT_ID"),
+        help="Merchant UUID to shop against (or set the MERCHANT_ID env var).",
+    )
+    parser.add_argument(
+        "--api-key",
+        default=os.environ.get("AGENT_API_KEY"),
+        help="Agent API key for the X-Agent-Api-Key header (or set the AGENT_API_KEY env var).",
+    )
+    parser.add_argument(
+        "--base-url",
+        default=os.environ.get("BASE_URL", "http://localhost:8000"),
+        help="Backend base URL (or set the BASE_URL env var). Default: http://localhost:8000",
+    )
+    args = parser.parse_args()
+    if not args.merchant_id:
+        parser.error(
+            "--merchant-id is required (or set the MERCHANT_ID env var). "
+            "Get one from POST /merchant/onboarding/keys or the /onboarding dashboard page."
+        )
+    if not args.api_key:
+        parser.error(
+            "--api-key is required (or set the AGENT_API_KEY env var). It's returned once, "
+            "at onboarding time, from POST /merchant/onboarding/keys — never shown again."
+        )
+    return args
+
+
+def _error_detail(resp: httpx.Response) -> str:
+    try:
+        body = resp.json()
+    except ValueError:
+        return resp.text
+    detail = body.get("detail")
+    return detail if isinstance(detail, str) else str(detail)
+
+
+def main() -> int:
+    args = parse_args()
+    api = f"{args.base_url.rstrip('/')}/api/v1"
+    # X-Agent-Api-Key applies to every call via the client default; Idempotency-Key
+    # is per-checkout-attempt, so it's set explicitly on each POST /agent/checkout below.
+    client = httpx.Client(timeout=30.0, headers={"X-Agent-Api-Key": args.api_key})
+
+    print(f"🤖 AI buyer agent starting up — merchant_id={args.merchant_id}, backend={args.base_url}\n")
+
+    # --- Discover catalog ----------------------------------------------------
+    print("🔍 Discovering catalog...")
+    resp = client.get(f"{api}/agent/catalog", params={"merchant_id": args.merchant_id})
+    resp.raise_for_status()
+    catalog = resp.json()
+
+    if not catalog:
+        print("   No products found for this merchant. Add some via the /catalog dashboard page first.")
+        return 1
+
+    for item in catalog:
+        print(
+            f"   • {item['name']} — {item['price']} {item['currency']} "
+            f"(category={item['category']!r}, stock={item['stock']})"
+        )
+    print()
+
+    # --- Check policy, so we know how to build both a compliant and a violating cart ---
+    print("📜 Checking merchant policy...")
+    resp = client.get(f"{api}/merchant/{args.merchant_id}/policy")
+    resp.raise_for_status()
+    policy = resp.json()
+    max_amount = policy.get("maxAmount")
+    print(
+        f"   max_amount={max_amount}, allowed_categories={policy.get('allowedCategories')}, "
+        f"per_user_limit={policy.get('perUserLimit')}\n"
+    )
+
+    # --- Success case: pick the cheapest product, buy 1 ----------------------
+    product = min(catalog, key=lambda p: p["price"])
+    print(f"🛒 Building cart: 1x {product['name']} ({product['price']} {product['currency']})")
+    print("💳 Calling checkout...")
+    payload = {
+        "merchant_id": args.merchant_id,
+        "cart_items": [{"product_id": product["id"], "quantity": 1}],
+        "customer_context": {"customer_id": "demo-buyer-agent"},
+    }
+    idempotency_key = str(uuid.uuid4())
+    print(f"   Idempotency-Key: {idempotency_key}")
+    resp = client.post(f"{api}/agent/checkout", json=payload, headers={"Idempotency-Key": idempotency_key})
+    if resp.status_code < 400:
+        order = resp.json()
+        print(f"✅ Order created: {order.get('razorpayOrderId')} — {order.get('amount')} {order.get('currency')}")
+        print(f"   Explanation: {order.get('explanation')}")
+        if order.get("upsellSuggestions"):
+            names = ", ".join(u["name"] for u in order["upsellSuggestions"])
+            print(f"   💡 Upsell suggestions offered: {names}")
+    else:
+        print(f"❌ Unexpected denial on what should have been a valid cart: {_error_detail(resp)}")
+    print()
+
+    # --- Failure case: deliberately exceed max_amount -------------------------
+    if max_amount is None:
+        print(
+            "⚠️  Merchant policy has no max_amount configured — skipping the deliberate-denial demo "
+            "(every checkout would 403 for a different reason: PolicyEngine fails closed on a missing max_amount)."
+        )
+        return 0
+
+    price = float(product["price"])
+    over_budget_qty = math.floor(float(max_amount) / price) + 1 if price > 0 else 1
+    print(f"🛒 Building a cart that deliberately exceeds max_amount: {over_budget_qty}x {product['name']}")
+    print("💳 Calling checkout (expecting a policy denial)...")
+    bad_payload = {
+        "merchant_id": args.merchant_id,
+        "cart_items": [{"product_id": product["id"], "quantity": over_budget_qty}],
+        "customer_context": {"customer_id": "demo-buyer-agent"},
+    }
+    bad_idempotency_key = str(uuid.uuid4())
+    print(f"   Idempotency-Key: {bad_idempotency_key}")
+    resp = client.post(
+        f"{api}/agent/checkout", json=bad_payload, headers={"Idempotency-Key": bad_idempotency_key}
+    )
+    if resp.status_code >= 400:
+        print(f"❌ Denied ({resp.status_code}): {_error_detail(resp)}")
+    else:
+        print("⚠️  Expected a denial but checkout succeeded — policy may be more permissive than assumed.")
+        print(f"   {resp.json()}")
+    print()
+
+    # --- Conversational checkout: a message the catalog can satisfy ----------
+    print("💬 Conversational checkout: a message that maps to a real product...")
+    chat_message = f"1x {product['name']}"
+    print(f"   Message: {chat_message!r}")
+    resp = client.post(
+        f"{api}/agent/chat-checkout",
+        json={
+            "merchant_id": args.merchant_id,
+            "message": chat_message,
+            "customer_context": {"customer_id": "demo-buyer-agent"},
+        },
+    )
+    if resp.status_code >= 400:
+        print(f"❌ Unexpected error: {_error_detail(resp)}")
+    else:
+        chat_result = resp.json()
+        print(f"   Interpretation: {chat_result.get('interpretation')}")
+        if chat_result.get("matched"):
+            order = chat_result.get("checkoutResult") or {}
+            print(f"✅ Order created: {order.get('razorpayOrderId')} — {order.get('amount')} {order.get('currency')}")
+        else:
+            print("   No confident match (matched=false) — a valid outcome, not an error.")
+    print()
+
+    # --- Conversational checkout: a message the catalog can't satisfy --------
+    print("💬 Conversational checkout: a message nothing in the catalog can satisfy...")
+    resp = client.post(
+        f"{api}/agent/chat-checkout",
+        json={
+            "merchant_id": args.merchant_id,
+            "message": "buy me a spaceship",
+            "customer_context": {"customer_id": "demo-buyer-agent"},
+        },
+    )
+    if resp.status_code >= 400:
+        print(f"❌ Unexpected error: {_error_detail(resp)}")
+    else:
+        chat_result = resp.json()
+        print(f"   matched={chat_result.get('matched')} — {chat_result.get('interpretation')}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,18 +1,6 @@
 version: "3.9"
 
 services:
-  postgres:
-    image: postgres:16
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: agentic_merchant
-    ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-
   redis:
     image: redis:7
     restart: unless-stopped
@@ -26,11 +14,14 @@ services:
     restart: unless-stopped
     env_file:
       - ../.env
+    environment:
+      REDIS_URL: redis://redis:6379/0
     depends_on:
-      - postgres
-      - redis
+      redis:
+        condition: service_started
     ports:
       - "8000:8000"
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
 
   frontend:
     build:
@@ -42,5 +33,15 @@ services:
     ports:
       - "3000:3000"
 
-volumes:
-  pgdata:
+  mcp-server:
+    build:
+      context: ../apps/mcp-server
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      BACKEND_BASE_URL: http://backend:8000
+      API_V1_PREFIX: /api/v1
+    depends_on:
+      - backend
+    ports:
+      - "8001:8001"

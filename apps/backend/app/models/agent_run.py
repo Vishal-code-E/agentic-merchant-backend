@@ -19,3 +19,7 @@ class AgentRun(Base, TimestampMixin):
     langfuse_trace_id: Mapped[str] = mapped_column(String(255), nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: From the optional X-Agent-Name/X-Agent-Version headers (informational, not a trust
+    #: boundary — see router_checkout.py) — "unknown" when the caller didn't send one.
+    agent_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    agent_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
