@@ -14,10 +14,17 @@ from app.api import (
     router_observability,
     router_onboarding,
     router_policy,
+    router_retention,
 )
 from app.config.settings import get_settings
 from app.db.session import engine
 from app.observability.langfuse_client import get_langfuse_client
+from app.services.data_sanitizer import SensitiveDataFilter
+
+# Install payment/credential sanitization filter globally across logging
+for handler in logging.root.handlers:
+    handler.addFilter(SensitiveDataFilter())
+logging.getLogger().addFilter(SensitiveDataFilter())
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -98,3 +105,4 @@ app.include_router(router_checkout.router, prefix=settings.api_v1_prefix)
 app.include_router(router_policy.router, prefix=settings.api_v1_prefix)
 app.include_router(router_observability.router, prefix=settings.api_v1_prefix)
 app.include_router(router_campaigns.router, prefix=settings.api_v1_prefix)
+app.include_router(router_retention.router, prefix=settings.api_v1_prefix)

@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
+import { useRouter } from "next/navigation";
 import type {
   OnboardMerchantRequest,
   OnboardMerchantResponse,
@@ -27,12 +28,52 @@ const initialForm: FormState = {
   perUserLimit: "",
 };
 
+interface FlowStep {
+  number: string;
+  title: string;
+  description: string;
+}
+
+const FLOW: FlowStep[] = [
+  {
+    number: "01",
+    title: "Catalog",
+    description: "Add products to sell — the exact list an agent's GET /agent/catalog call will see.",
+  },
+  {
+    number: "02",
+    title: "Policies",
+    description:
+      "Set the spending ceiling, per-user limit, and allowed categories every checkout is checked against.",
+  },
+  {
+    number: "03",
+    title: "Chat",
+    description:
+      "Type a plain-English order and watch it turn into a real, policy-checked cart — no structured JSON required.",
+  },
+  {
+    number: "04",
+    title: "Growth",
+    description:
+      "An AI reasons over your recent orders and real catalog to recommend retry nudges, loyalty offers, and upsells — and explains why, every time.",
+  },
+  {
+    number: "05",
+    title: "Observability",
+    description: "Watch agent runs land in real time, and open any run's audit trail to see why.",
+  },
+];
+
+const REDIRECT_DELAY_MS = 5000;
+
 // Local dev convenience only, from .env.local (gitignored) — never a live key.
 const TEST_RAZORPAY_KEY_ID = process.env.NEXT_PUBLIC_TEST_RAZORPAY_KEY_ID;
 const TEST_RAZORPAY_KEY_SECRET = process.env.NEXT_PUBLIC_TEST_RAZORPAY_KEY_SECRET;
 
 export default function OnboardingPage() {
   const { setMerchantId, setAgentApiKey } = useMerchant();
+  const router = useRouter();
   const [form, setForm] = useState<FormState>(initialForm);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -42,6 +83,13 @@ export default function OnboardingPage() {
   const [confirmingRegenerate, setConfirmingRegenerate] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
   const [regenerateError, setRegenerateError] = useState<string | null>(null);
+
+  // Give the user a window to copy the one-time API key before leaving this page.
+  useEffect(() => {
+    if (!result) return;
+    const timer = setTimeout(() => router.push("/"), REDIRECT_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [result, router]);
 
   function update<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -82,7 +130,7 @@ export default function OnboardingPage() {
       setResult(response);
       setApiKey(response.api_key);
       setMerchantId(response.merchant.id);
-      setAgentApiKey(response.api_key); // makes chat-checkout usable right away, same session
+      setAgentApiKey(response.api_key); // makes chat usable right away, same session
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Something went wrong. Is the backend running?");
     } finally {
@@ -110,18 +158,57 @@ export default function OnboardingPage() {
     }
   }
 
-  function handleOnboardAnother() {
-    setResult(null);
-    setApiKey(null);
-    setForm(initialForm);
-    setError(null);
-    setCopied(false);
-    setConfirmingRegenerate(false);
-    setRegenerateError(null);
-  }
-
   return (
     <main className="container">
+      {!result && (
+        <>
+          <section className="hero">
+            <h1>A store an AI shopping agent can actually buy from.</h1>
+            <p>
+              This backend gives a Razorpay merchant an agent-readable catalog, a policy-gated
+              checkout, and a full audit trail — everything an autonomous buyer needs to browse,
+              transact, and be trusted.
+            </p>
+          </section>
+
+          <section>
+            <p className="section-label">The flow</p>
+            <p className="section-intro">
+              Onboarding below mints the merchant_id and agent API key everything after it uses.
+            </p>
+
+            <div className="flow">
+              {FLOW.map((step) => (
+                <div className="flow-step" key={step.number}>
+                  <span className="flow-step-number">{step.number}</span>
+                  <div className="flow-step-body">
+                    <h3>{step.title}</h3>
+                    <p>{step.description}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="about">
+            <h2>How this works</h2>
+            <p>
+              Every onboarded merchant gets a machine-readable product catalog an agent can query
+              directly — no scraping, no guessing at what&apos;s in stock. A checkout only clears
+              after it&apos;s checked against that merchant&apos;s own spending ceiling, per-user
+              limit, and category rules, so an agent can&apos;t spend past what the merchant
+              allowed.
+            </p>
+            <p>
+              Every request, policy decision, and Razorpay call is written to an audit trail tied
+              to a traceable run, so any approved or denied checkout can be explained after the
+              fact. It&apos;s the same trust boundary a human checkout enforces, built for a caller
+              you can&apos;t ask &ldquo;are you sure?&rdquo;
+            </p>
+          </section>
+        </>
+      )}
+
       <header className="page-header">
         <h1>Onboarding</h1>
         <p className="page-subtitle">
@@ -136,8 +223,7 @@ export default function OnboardingPage() {
         <>
           <div className="banner banner-success">
             <strong>Merchant onboarded.</strong> merchant_id:{" "}
-            <code>{result.merchant.id}</code> is now the active merchant for the rest of this
-            dashboard.
+            <code>{result.merchant.id}</code> is now the active merchant.
             {!result.keys_valid && (
               <div style={{ marginTop: 4 }}>
                 Note: Razorpay key validation failed — the merchant was created with status{" "}
@@ -154,9 +240,7 @@ export default function OnboardingPage() {
               that immediately invalidates this one.
             </div>
             <div className="api-key-box">
-              <code className="api-key-value">
-                {apiKey}
-              </code>
+              <code className="api-key-value">{apiKey}</code>
               <button type="button" className="btn-secondary" onClick={handleCopyApiKey}>
                 {copied ? "Copied!" : "Copy"}
               </button>
@@ -202,9 +286,12 @@ export default function OnboardingPage() {
             </div>
           </div>
 
-          <button type="button" className="btn-secondary" onClick={handleOnboardAnother}>
-            Onboard a different merchant
-          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <button type="button" className="btn" onClick={() => router.push("/")}>
+              Continue to chat →
+            </button>
+            <span className="hint">Redirecting automatically in a few seconds…</span>
+          </div>
         </>
       )}
 

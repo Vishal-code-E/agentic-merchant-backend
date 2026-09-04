@@ -1,6 +1,6 @@
 import uuid
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
 
 
@@ -14,6 +14,7 @@ class PolicyResponse(BaseModel):
     max_amount: float | None
     allowed_categories: list[str]
     per_user_limit: float | None
+    max_discount_pct: float = 30.0
 
 
 class PolicyUpdate(BaseModel):
@@ -33,3 +34,11 @@ class PolicyUpdate(BaseModel):
     max_amount: float | None = Field(default=None, gt=0)
     allowed_categories: list[str] | None = None
     per_user_limit: float | None = Field(default=None, gt=0)
+    max_discount_pct: float | None = Field(default=None, ge=0.0, le=50.0, description="Max discount % (0-50%).")
+
+    @model_validator(mode="after")
+    def validate_limits(self) -> "PolicyUpdate":
+        if self.max_amount is not None and self.per_user_limit is not None:
+            if self.per_user_limit > self.max_amount:
+                raise ValueError("per_user_limit cannot exceed max_amount.")
+        return self

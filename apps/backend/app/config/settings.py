@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     # Matches the Python SDK v4 env var (LANGFUSE_BASE_URL) and constructor
     # kwarg (base_url) — the older LANGFUSE_HOST/host naming is SDK v2-era.
     langfuse_base_url: str = Field(default="https://cloud.langfuse.com")
+    data_retention_days: int = Field(default=90, description="Retention window for audit logs and agent runs in days")
 
     # --- Model provider (universal abstraction; config-driven) ---
     model_provider: str = Field(default="anthropic")  # anthropic | openai | gemini

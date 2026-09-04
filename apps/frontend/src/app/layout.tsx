@@ -1,7 +1,8 @@
 import { IBM_Plex_Sans, Space_Grotesk } from "next/font/google";
 import "./globals.css";
 import { MerchantProvider } from "../lib/merchant-context";
-import { Nav } from "./nav";
+import { Sidebar } from "./sidebar";
+import { ComplianceBanner } from "./components/compliance-banner";
 
 // Self-hosted by Next at build time — no runtime CDN request. Space Grotesk
 // carries headings/buttons/brand (display); Plex Sans carries body/forms/tables.
@@ -30,8 +31,13 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en" className={`${spaceGrotesk.variable} ${plexSans.variable}`}>
       <body>
         <MerchantProvider>
-          <Nav />
-          {children}
+          <div className="app-shell">
+            <Sidebar />
+            <div className="app-main">
+              <ComplianceBanner />
+              {children}
+            </div>
+          </div>
         </MerchantProvider>
       </body>
     </html>

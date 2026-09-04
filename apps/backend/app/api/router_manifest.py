@@ -51,6 +51,7 @@ async def agent_manifest() -> dict:
                         "description": "Filter to products priced at or below this amount.",
                     },
                 },
+                "rate_limit": "60 requests/minute per API key",
             },
             "checkout": {
                 "path": f"{prefix}/agent/checkout",
@@ -81,6 +82,7 @@ async def agent_manifest() -> dict:
                         },
                     },
                 },
+                "rate_limit": "20 requests/minute per API key",
             },
             "chat_checkout": {
                 "path": f"{prefix}/agent/chat-checkout",
@@ -99,7 +101,11 @@ async def agent_manifest() -> dict:
                         "message": {
                             "type": "string",
                             "required": True,
-                            "description": "The shopper's free-text request, e.g. '2x face wash under 400'.",
+                            "max_length": 500,
+                            "description": (
+                                "The shopper's free-text request, e.g. '2x face wash under 400'. "
+                                "Rejected with a 400 before any model call if longer than 500 chars."
+                            ),
                         },
                         "merchant_id": {"type": "string", "format": "uuid", "required": True},
                         "customer_context": {
@@ -136,6 +142,7 @@ async def agent_manifest() -> dict:
                     "an explicit key is therefore NOT idempotent — pass your own key for "
                     "replay-safety."
                 ),
+                "rate_limit": "10 requests/minute per API key (LLM cost-sensitive)",
             },
         },
         "auth": {
@@ -150,6 +157,24 @@ async def agent_manifest() -> dict:
                 f"Returned once, in the response of POST {prefix}/merchant/onboarding/keys, "
                 "at merchant onboarding time. It cannot be retrieved again afterwards — "
                 "store it securely. A request with a missing or invalid key gets a 401."
+            ),
+        },
+        "rate_limiting": {
+            "scope": "per API key, per endpoint (see each endpoint's rate_limit field above)",
+            "on_breach": "429 with a Retry-After header and a human-readable detail message.",
+            "availability_note": (
+                "Backed by Redis; if Redis is unreachable this fails open (requests proceed "
+                "unlimited) rather than the endpoint going down — not a guarantee callers "
+                "should rely on for cost control."
+            ),
+        },
+        "agent_identity": {
+            "headers": ["X-Agent-Name", "X-Agent-Version"],
+            "required_on": [],
+            "description": (
+                "Optional, informational only — never a trust or authorization boundary. "
+                "When present, recorded on the AgentRun row and the Langfuse trace for that "
+                "call; defaults to \"unknown\" when absent."
             ),
         },
         "idempotency": {

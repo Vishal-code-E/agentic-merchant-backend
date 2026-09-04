@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.checkout_graph import build_checkout_graph
 from app.agents.state import CheckoutState
+from app.config.settings import get_settings
 from app.db.session import get_db
 from app.models.agent_run import AgentRun
 from app.models.product import Product
@@ -23,9 +24,17 @@ from app.schemas.checkout import (
 from app.schemas.product import ProductResponse
 from app.services.agent_auth import verify_agent_api_key
 from app.services.audit_service import AuditService
-from app.services.intent_parser import IntentParserUnavailable, parse_intent_to_cart
+from app.services.intent_parser import (
+    IntentParserUnavailable,
+    MessageTooLongError,
+    detect_suspicious_pattern,
+    parse_intent_to_cart,
+    validate_message_length,
+)
+from app.services.rate_limiter import enforce_rate_limit
 
 router = APIRouter(tags=["checkout"])
+settings = get_settings()
 
 RAZORPAY_ERRORS = (BadRequestError, GatewayError, ServerError)
 
@@ -150,6 +159,8 @@ async def agent_checkout(
     payload: CheckoutRequest,
     x_agent_api_key: str | None = Header(default=None, alias="X-Agent-Api-Key"),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    x_agent_name: str | None = Header(default=None, alias="X-Agent-Name"),
+    x_agent_version: str | None = Header(default=None, alias="X-Agent-Version"),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -191,6 +202,7 @@ async def agent_checkout(
     call has nothing to group with unless we know which customer it's for.
     """
     await verify_agent_api_key(payload.merchant_id, x_agent_api_key, db)
+    await enforce_rate_limit("agent_checkout", x_agent_api_key)
 
     if not idempotency_key:
         raise HTTPException(
@@ -202,10 +214,28 @@ async def agent_checkout(
             ),
         )
 
+    request_id = str(uuid.uuid4())  # distinct from agent_run.id — identifies this HTTP call, not the graph run
+    agent_name = x_agent_name or "unknown"
+    agent_version = x_agent_version or "unknown"
+
     trace_id = langfuse.get_current_trace_id()
     customer_id = (payload.customer_context or {}).get("customer_id")
 
-    propagation_kwargs: dict = {"trace_name": "agent-checkout", "tags": ["checkout"]}
+    trace_metadata = {
+        "merchant_id": str(payload.merchant_id),
+        "endpoint": "/agent/checkout",
+        "agent_name": agent_name,
+        "agent_version": agent_version,
+        "request_id": request_id,
+        "idempotency_key": idempotency_key,
+    }
+
+    propagation_kwargs: dict = {
+        "trace_name": "agent-checkout",
+        "tags": ["checkout"],
+        "metadata": trace_metadata,
+        "environment": settings.app_env,
+    }
     if customer_id:
         propagation_kwargs["user_id"] = str(customer_id)
         propagation_kwargs["session_id"] = str(customer_id)
@@ -230,6 +260,8 @@ async def agent_checkout(
             status="running",
             langfuse_trace_id=trace_id,
             started_at=datetime.now(timezone.utc),
+            agent_name=agent_name,
+            agent_version=agent_version,
         )
         db.add(agent_run)
         await db.commit()
@@ -247,6 +279,8 @@ async def agent_chat_checkout(
     payload: ChatCheckoutRequest,
     x_agent_api_key: str | None = Header(default=None, alias="X-Agent-Api-Key"),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    x_agent_name: str | None = Header(default=None, alias="X-Agent-Name"),
+    x_agent_version: str | None = Header(default=None, alias="X-Agent-Version"),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -269,12 +303,36 @@ async def agent_chat_checkout(
     satisfy, not a server error.
     """
     await verify_agent_api_key(payload.merchant_id, x_agent_api_key, db)
+    await enforce_rate_limit("agent_chat_checkout", x_agent_api_key)
 
+    try:
+        validate_message_length(payload.message)
+    except MessageTooLongError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    request_id = str(uuid.uuid4())  # distinct from agent_run.id — identifies this HTTP call, not the graph run
+    agent_name = x_agent_name or "unknown"
+    agent_version = x_agent_version or "unknown"
     customer_id = (payload.customer_context or {}).get("customer_id")
+
+    trace_metadata = {
+        "merchant_id": str(payload.merchant_id),
+        "endpoint": "/agent/chat-checkout",
+        "agent_name": agent_name,
+        "agent_version": agent_version,
+        "request_id": request_id,
+    }
+    if idempotency_key:
+        trace_metadata["idempotency_key"] = idempotency_key
 
     # tags include "chat" so this trace is identifiable as chat-originated,
     # distinct from a structured /agent/checkout call.
-    propagation_kwargs: dict = {"trace_name": "chat-checkout", "tags": ["checkout", "chat"]}
+    propagation_kwargs: dict = {
+        "trace_name": "chat-checkout",
+        "tags": ["checkout", "chat"],
+        "metadata": trace_metadata,
+        "environment": settings.app_env,
+    }
     if customer_id:
         propagation_kwargs["user_id"] = str(customer_id)
         propagation_kwargs["session_id"] = str(customer_id)
@@ -282,9 +340,10 @@ async def agent_chat_checkout(
     with propagate_attributes(**propagation_kwargs):
         # get_current_trace_id() inside propagate_attributes — see agent_checkout's
         # identical comment for why this ordering matters.
+        from app.services.data_sanitizer import sanitize_string
         trace_id = langfuse.get_current_trace_id()
         langfuse.update_current_span(
-            input={"merchant_id": str(payload.merchant_id), "message": payload.message}
+            input={"merchant_id": str(payload.merchant_id), "message": sanitize_string(payload.message)}
         )
 
         agent_run = AgentRun(
@@ -294,9 +353,25 @@ async def agent_chat_checkout(
             status="running",
             langfuse_trace_id=trace_id,
             started_at=datetime.now(timezone.utc),
+            agent_name=agent_name,
+            agent_version=agent_version,
         )
         db.add(agent_run)
         await db.commit()
+
+        # Detection, not blocking (see intent_parser.detect_suspicious_pattern's
+        # docstring) — audited BEFORE the LLM call below, whatever the outcome.
+        suspicious_pattern = detect_suspicious_pattern(payload.message)
+        suspicious_metadata = {"suspicious_input": bool(suspicious_pattern)}
+        if suspicious_pattern:
+            suspicious_metadata["suspicious_pattern"] = suspicious_pattern
+        langfuse.update_current_span(metadata=suspicious_metadata)
+        if suspicious_pattern:
+            await AuditService(db).log_event(
+                agent_run_id=str(agent_run.id),
+                event_type="suspicious_input_detected",
+                payload={"pattern": suspicious_pattern, "message": payload.message},
+            )
 
         catalog_result = await db.execute(
             select(Product).where(Product.merchant_id == payload.merchant_id, Product.stock > 0)

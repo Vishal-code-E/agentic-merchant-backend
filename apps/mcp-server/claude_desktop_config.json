@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "razorpay-agentic-merchant": {
+      "command": "python",
+      "args": [
+        "-m",
+        "server"
+      ],
+      "env": {
+        "PYTHONPATH": "/Users/vishale/Documents/agentic-merchant-backend/apps/mcp-server",
+        "BACKEND_BASE_URL": "http://localhost:8000",
+        "DEFAULT_MERCHANT_ID": "<MERCHANT_UUID_FROM_ONBOARDING>",
+        "DEFAULT_AGENT_API_KEY": "<AGENT_API_KEY_FROM_ONBOARDING>"
+      }
+    }
+  }
+}

@@ -24,6 +24,48 @@ class IntentParserUnavailable(RuntimeError):
     pass
 
 
+#: Longer messages cost more to run through the LLM and widen the room for
+#: an injection attempt — rejected before the request does any DB/LLM work.
+MAX_MESSAGE_LENGTH = 500
+
+
+class MessageTooLongError(ValueError):
+    """Raised by validate_message_length(); the router maps this to a 400."""
+
+
+def validate_message_length(message: str) -> None:
+    if len(message) > MAX_MESSAGE_LENGTH:
+        raise MessageTooLongError(
+            f"Message too long ({len(message)} chars; max {MAX_MESSAGE_LENGTH})."
+        )
+
+
+#: Known jailbreak/prompt-injection phrasings, lowercased substring match.
+_SUSPICIOUS_PATTERNS = (
+    "ignore previous instructions",
+    "ignore all previous instructions",
+    "disregard previous instructions",
+    "disregard all previous instructions",
+    "system prompt",
+    "you are now",
+    "new instructions",
+    "jailbreak",
+)
+
+
+def detect_suspicious_pattern(message: str) -> str | None:
+    """
+    Returns the matched phrase, or None. Detection only, not blocking: a
+    false positive here would refuse a legitimate order (e.g. "act as a gift
+    for my mom" contains no listed phrase, but a stricter list could easily
+    catch innocent text), whereas a false negative still has to get past the
+    actual boundary — ValidateCart's DB re-pricing and the enum-constrained
+    product_id schema below, neither of which trusts model output anyway.
+    """
+    lowered = message.lower()
+    return next((p for p in _SUSPICIOUS_PATTERNS if p in lowered), None)
+
+
 _SYSTEM_PROMPT = (
     "You are a shopping cart interpreter for an e-commerce merchant. Given a "
     "shopper's natural-language message and the merchant's live product catalog "

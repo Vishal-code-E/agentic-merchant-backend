@@ -32,3 +32,16 @@ services:
       - backend
     ports:
       - "3000:3000"
+
+  mcp-server:
+    build:
+      context: ../apps/mcp-server
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      BACKEND_BASE_URL: http://backend:8000
+      API_V1_PREFIX: /api/v1
+    depends_on:
+      - backend
+    ports:
+      - "8001:8001"

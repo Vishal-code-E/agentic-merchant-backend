@@ -8,14 +8,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.campaign_graph import build_campaign_graph
 from app.agents.state import CampaignState
+from app.config.settings import get_settings
 from app.db.session import get_db
 from app.models.agent_run import AgentRun
 from app.observability.langfuse_client import get_langfuse_client, get_langfuse_handler
-from app.schemas.campaign import CampaignRunRequest, CampaignRunResponse
+from app.schemas.campaign import CampaignActionResult, CampaignRunRequest, CampaignRunResponse
 
 router = APIRouter(tags=["campaigns"])
 
 langfuse = get_langfuse_client()
+settings = get_settings()
 
 
 @router.post("/internal/campaigns/run", response_model=CampaignRunResponse)
@@ -33,7 +35,16 @@ async def run_campaign(payload: CampaignRunRequest, db: AsyncSession = Depends(g
     not one of several related traces (unlike a multi-turn conversation),
     so there's nothing for a Langfuse session to group.
     """
-    with propagate_attributes(trace_name="run-campaign", tags=["campaign"]):
+    request_id = str(uuid.uuid4())  # distinct from agent_run.id — see router_checkout.py's identical convention
+    trace_metadata = {
+        "merchant_id": str(payload.merchant_id),
+        "endpoint": "/internal/campaigns/run",
+        "request_id": request_id,
+    }
+
+    with propagate_attributes(
+        trace_name="run-campaign", tags=["campaign"], metadata=trace_metadata, environment=settings.app_env
+    ):
         # get_current_trace_id() must be called inside propagate_attributes so
         # the OTel span is active and the ID is non-None — same as router_checkout.
         trace_id = langfuse.get_current_trace_id()
@@ -77,7 +88,7 @@ async def run_campaign(payload: CampaignRunRequest, db: AsyncSession = Depends(g
         agent_run.ended_at = datetime.now(timezone.utc)
         await db.commit()
 
-        actions = result.get("actions") or []
+        actions = [CampaignActionResult(**a) for a in result.get("actions") or []]
         langfuse.update_current_span(output={"status": "success", "action_count": len(actions)})
         await asyncio.to_thread(langfuse.flush)
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from typing import Callable
 
 import httpx
 
@@ -29,6 +30,58 @@ DEMO_PRODUCTS = [
     {"name": "Face Wash", "price": 380, "category": "skincare", "stock": 50},
     {"name": "Moisturizer", "price": 420, "category": "skincare", "stock": 50},
 ]
+
+
+def onboard_merchant(
+    client: httpx.Client,
+    api: str,
+    name: str,
+    razorpay_key_id: str,
+    razorpay_key_secret: str,
+    max_amount: float,
+    allowed_categories: list[str],
+    per_user_limit: float | None,
+    narrate: Callable[[str], None],
+) -> tuple[str, str]:
+    """POST /merchant/onboarding/keys; returns (merchant_id, api_key). Shared with seed_test_data.py."""
+    narrate(f"🏗️  Onboarding {name!r}...")
+    payload = {
+        "name": name,
+        "razorpay_key_id": razorpay_key_id,
+        "razorpay_key_secret": razorpay_key_secret,
+        "max_amount": max_amount,
+        "allowed_categories": allowed_categories,
+        "per_user_limit": per_user_limit,
+    }
+    resp = client.post(f"{api}/merchant/onboarding/keys", json=payload)
+    resp.raise_for_status()
+    onboarded = resp.json()
+
+    if not onboarded["keys_valid"]:
+        narrate("⚠️  Razorpay key validation failed — checkout calls later will error. Check your test keys.")
+    merchant_id = onboarded["merchant"]["id"]
+    narrate(f"   merchant_id={merchant_id}")
+
+    return merchant_id, onboarded["api_key"]
+
+
+def seed_products(
+    client: httpx.Client,
+    api: str,
+    merchant_id: str,
+    products: list[dict],
+    narrate: Callable[[str], None],
+) -> list[dict]:
+    """POST /merchant/products for each entry; returns the created ProductResponse bodies (real ids)."""
+    narrate("🛍️  Seeding catalog...")
+    created = []
+    for product in products:
+        payload = {"merchant_id": merchant_id, "currency": "INR", "tags": [], **product}
+        resp = client.post(f"{api}/merchant/products", json=payload)
+        resp.raise_for_status()
+        created.append(resp.json())
+        narrate(f"   + {product['name']} — {product['price']} INR ({product['category']})")
+    return created
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,31 +107,11 @@ def main() -> int:
     def narrate(msg: str) -> None:
         print(msg, file=sys.stderr)
 
-    narrate(f"🏗️  Onboarding {args.name!r} against {args.base_url}...")
-    onboard_payload = {
-        "name": args.name,
-        "razorpay_key_id": args.razorpay_key_id,
-        "razorpay_key_secret": args.razorpay_key_secret,
-        "max_amount": DEMO_MAX_AMOUNT,
-        "allowed_categories": [],
-        "per_user_limit": None,
-    }
-    resp = client.post(f"{api}/merchant/onboarding/keys", json=onboard_payload)
-    resp.raise_for_status()
-    onboarded = resp.json()
-    merchant_id = onboarded["merchant"]["id"]
-    api_key = onboarded["api_key"]
-
-    if not onboarded["keys_valid"]:
-        narrate("⚠️  Razorpay key validation failed — checkout calls later will error. Check your test keys.")
-    narrate(f"   merchant_id={merchant_id}")
-
-    narrate("🛍️  Seeding catalog...")
-    for product in DEMO_PRODUCTS:
-        payload = {"merchant_id": merchant_id, "currency": "INR", "tags": [], **product}
-        resp = client.post(f"{api}/merchant/products", json=payload)
-        resp.raise_for_status()
-        narrate(f"   + {product['name']} — {product['price']} INR ({product['category']})")
+    merchant_id, api_key = onboard_merchant(
+        client, api, args.name, args.razorpay_key_id, args.razorpay_key_secret,
+        DEMO_MAX_AMOUNT, [], None, narrate,
+    )
+    seed_products(client, api, merchant_id, DEMO_PRODUCTS, narrate)
 
     narrate("✅ Demo merchant ready.\n")
 

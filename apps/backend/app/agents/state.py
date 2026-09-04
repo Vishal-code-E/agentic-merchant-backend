@@ -42,7 +42,9 @@ class CampaignState(TypedDict, total=False):
     #: Order has no customer_id column, so these are order-level, not
     #: customer-level, segments (see campaign_graph.py's module docstring).
     segments: dict[str, list[dict[str, Any]]]
-    #: RecommendActions output, before the ApplyPolicy filter.
+    #: RecommendActions output, before the ApplyPolicy filter — one dict per
+    #: order, each carrying reasoning/confidence/suggested_discount_pct/path
+    #: from growth_agent.recommend_campaign_actions (see campaign_graph.py).
     recommended_actions: list[dict[str, Any]]
     #: ApplyPolicy output — recommended_actions that survived PolicyEngine.evaluate().
     #: This is what EmitAudit logs and the endpoint returns.

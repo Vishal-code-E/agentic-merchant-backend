@@ -9,6 +9,7 @@ interface FormState {
   maxAmount: string;
   allowedCategories: string;
   perUserLimit: string;
+  maxDiscountPct: string;
 }
 
 function toForm(policy: Policy): FormState {
@@ -16,6 +17,7 @@ function toForm(policy: Policy): FormState {
     maxAmount: policy.maxAmount != null ? String(policy.maxAmount) : "",
     allowedCategories: policy.allowedCategories.join(", "),
     perUserLimit: policy.perUserLimit != null ? String(policy.perUserLimit) : "",
+    maxDiscountPct: policy.maxDiscountPct != null ? String(policy.maxDiscountPct) : "30",
   };
 }
 
@@ -62,22 +64,44 @@ export default function PoliciesPage() {
   function update<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((prev) => (prev ? { ...prev, [key]: value } : prev));
     setSaved(false);
+    setError(null);
   }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     if (!merchantId || !form) return;
     setError(null);
+
+    // --- Client-side UX safety guardrails ---
+    const maxAmt = form.maxAmount ? Number(form.maxAmount) : NaN;
+    if (isNaN(maxAmt) || maxAmt <= 0) {
+      setError("Max amount per checkout is required and must be greater than 0.");
+      return;
+    }
+
+    const discount = form.maxDiscountPct ? Number(form.maxDiscountPct) : NaN;
+    if (isNaN(discount) || discount < 0 || discount > 50) {
+      setError("Max campaign discount must be between 0% and 50% to prevent runaway discount creation.");
+      return;
+    }
+
+    const userLimit = form.perUserLimit ? Number(form.perUserLimit) : null;
+    if (userLimit != null && userLimit > maxAmt) {
+      setError(`Per-user limit (${userLimit}) cannot exceed max checkout ceiling (${maxAmt}).`);
+      return;
+    }
+
     setSaving(true);
     setSaved(false);
 
     const payload: PolicyUpdate = {
-      maxAmount: form.maxAmount ? Number(form.maxAmount) : undefined,
+      maxAmount: maxAmt,
       allowedCategories: form.allowedCategories
         .split(",")
         .map((c) => c.trim())
         .filter(Boolean),
-      perUserLimit: form.perUserLimit ? Number(form.perUserLimit) : undefined,
+      perUserLimit: userLimit ?? undefined,
+      maxDiscountPct: discount,
     };
 
     try {
@@ -110,13 +134,13 @@ export default function PoliciesPage() {
       <header className="page-header">
         <h1>Policies</h1>
         <p className="page-subtitle">
-          Guardrails for merchant <code>{merchantId}</code>. Every checkout is evaluated against
-          these before any Razorpay call.
+          Deterministic guardrails for merchant <code>{merchantId}</code>. Every checkout and growth recommendation
+          is evaluated against these before any external payment or customer action.
         </p>
       </header>
 
       {error && <div className="banner banner-error">{error}</div>}
-      {saved && <div className="banner banner-success">Policy updated.</div>}
+      {saved && <div className="banner banner-success">Policy successfully updated and active.</div>}
 
       {loading && (
         <div className="card">
@@ -132,43 +156,67 @@ export default function PoliciesPage() {
         <form className="card" onSubmit={handleSubmit}>
           <div className="form-row">
             <div className="field">
-              <label htmlFor="maxAmount">Max amount per checkout</label>
+              <label htmlFor="maxAmount">
+                Max amount per checkout <span style={{ color: "var(--color-danger)" }}>*</span>
+              </label>
               <input
                 id="maxAmount"
                 type="number"
-                min="0"
+                min="0.01"
                 step="0.01"
+                required
                 value={form.maxAmount}
                 onChange={(e) => update("maxAmount", e.target.value)}
               />
+              <span className="hint">Hard spending ceiling per checkout attempt. Required.</span>
             </div>
             <div className="field">
               <label htmlFor="perUserLimit">Per-user limit</label>
               <input
                 id="perUserLimit"
                 type="number"
-                min="0"
+                min="0.01"
                 step="0.01"
                 value={form.perUserLimit}
                 onChange={(e) => update("perUserLimit", e.target.value)}
               />
-              <span className="hint">Leave blank for no per-user limit.</span>
+              <span className="hint">Must be ≤ Max amount per checkout. Leave blank for no limit.</span>
             </div>
           </div>
 
-          <div className="field">
-            <label htmlFor="categories">Allowed categories</label>
-            <input
-              id="categories"
-              placeholder="electronics, books, apparel"
-              value={form.allowedCategories}
-              onChange={(e) => update("allowedCategories", e.target.value)}
-            />
-            <span className="hint">Comma-separated. Leave blank for no category restriction.</span>
+          <div className="form-row">
+            <div className="field">
+              <label htmlFor="maxDiscountPct">
+                Max campaign discount % <span style={{ color: "var(--color-danger)" }}>*</span>
+              </label>
+              <input
+                id="maxDiscountPct"
+                type="number"
+                min="0"
+                max="50"
+                step="1"
+                required
+                value={form.maxDiscountPct}
+                onChange={(e) => update("maxDiscountPct", e.target.value)}
+              />
+              <span className="hint">
+                Hard ceiling (0–50%) for automated AI growth campaigns. Prevents runaway/infinite discounts.
+              </span>
+            </div>
+            <div className="field">
+              <label htmlFor="categories">Allowed categories</label>
+              <input
+                id="categories"
+                placeholder="electronics, books, apparel"
+                value={form.allowedCategories}
+                onChange={(e) => update("allowedCategories", e.target.value)}
+              />
+              <span className="hint">Comma-separated. Leave blank to permit all categories.</span>
+            </div>
           </div>
 
           <button className="btn" type="submit" disabled={saving}>
-            {saving ? "Saving…" : "Save policy"}
+            {saving ? "Saving…" : "Save policy guardrails"}
           </button>
         </form>
       )}

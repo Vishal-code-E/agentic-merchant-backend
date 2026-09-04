@@ -13,6 +13,7 @@ Full product/design docs live in [`/docs`](./docs):
 - [`02-prd-agentic-merchant-backend.md`](./docs/02-prd-agentic-merchant-backend.md) — scope, requirements, delivery status
 - [`03-dev-handoff-architecture-lld.md`](./docs/03-dev-handoff-architecture-lld.md) — original tech stack / LLD planning doc
 - [`04-graph-engineering.md`](./docs/04-graph-engineering.md) — LangGraph design principles, node layouts
+- [`05-terms-and-compliance.md`](./docs/05-terms-and-compliance.md) — terms of service, legal framing, PCI/RBI/GDPR compliance, data retention
 - [`ARCHITECTURE.md`](./docs/ARCHITECTURE.md) — **as-built** design: graph flow, why policy sits where it does, auth/idempotency, tracing
 - [`DEMO.md`](./docs/DEMO.md) — the 5-minute, copy-paste, script-driven demo
 
@@ -46,20 +47,29 @@ See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for how these fit together,
 ## Architecture overview
 
 ```text
- AI agent / chat client
-        │  X-Agent-Api-Key, Idempotency-Key
-        ▼
- FastAPI  ── /agent/catalog, /agent/checkout, /agent/chat-checkout,
-             /merchant/*, /internal/campaigns/run, /observability/*
+ Claude Desktop / MCP Clients          Direct HTTP Agents / Chat Clients
+        │ (MCP Protocol / stdio / SSE)                 │ (X-Agent-Api-Key, Idempotency-Key)
+        ▼                                              │
+ MCP Server (apps/mcp-server)                          │
+   • catalog_tool                                      │
+   • checkout_tool                                     │
+   • chat_checkout_tool                                │
+        │                                              │
+        └───────────────────────┬──────────────────────┘
+                                ▼
+ FastAPI Backend ── /agent/catalog, /agent/checkout, /agent/chat-checkout,
+                    /merchant/*, /internal/campaigns/run, /observability/*,
+                    /internal/retention/cleanup
         │
         ├─▶ checkout_graph (LangGraph)  ── Input → ValidateCart → SuggestUpsell
         │                                   → CheckPolicy → CreateOrder → Finalize
         ├─▶ campaign_graph (LangGraph)  ── LoadOrders → SegmentCustomers
         │                                   → RecommendActions → ApplyPolicy → EmitAudit
-        ├─▶ intent_parser.py  ── LLM (Anthropic), JSON-schema-constrained output
+        ├─▶ intent_parser.py  ── LLM (Anthropic/OpenAI), JSON-schema-constrained output
         │                        → feeds a CheckoutRequest into checkout_graph
         ├─▶ PolicyEngine  ── the one gate every money-moving path passes through
         ├─▶ RazorpayClient  ── the only thing allowed to call Razorpay (test-mode)
+        ├─▶ DataSanitizer  ── card PAN, CVV, and token redaction before logs/DB
         └─▶ Langfuse + AuditService  ── every run traced, every decision logged
                      │
                      ▼
@@ -71,10 +81,12 @@ See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for how these fit together,
 ```
 
 - **FastAPI** — HTTP surface, request validation, OpenAPI docs.
+- **MCP Server** — official Python MCP SDK server exposing catalog, checkout, and conversational checkout tools to Claude Desktop and external orchestrators.
 - **LangGraph** — deterministic control flow for checkout and campaigns; the graph decides *whether* money moves, an LLM is only ever used for suggestion/interpretation (upsell heuristics, chat-checkout parsing), never for the policy decision itself.
 - **Postgres (Neon)** — the system of record: merchants, products, orders, policies, agent runs, audit logs.
+- **Data Sanitizer** — recursive scrubber guaranteeing no payment card numbers (PANs), CVVs, or secret tokens are persisted or logged.
 - **Langfuse** — a trace per `/agent/checkout`, `/agent/chat-checkout`, and `/internal/campaigns/run` call, with each graph node as a span.
-- **Next.js** — merchant-facing dashboard for onboarding, catalog, policy, and observability.
+- **Next.js** — merchant-facing dashboard with compliance disclaimers and safety rails for onboarding, catalog, policy, and observability.
 
 ## Repo layout (Nx workspace)
 
@@ -275,9 +287,11 @@ section just orients you.
   free-text message instead of a structured cart (see intent_parser.py).
   Requires `X-Agent-Api-Key`; `Idempotency-Key` is optional (one is generated
   per call if omitted — see the manifest's `idempotency_note`).
-- `GET/PATCH /merchant/{merchant_id}/policy` — read/update a merchant's guardrails.
+- `GET/PATCH /merchant/{merchant_id}/policy` — read/update a merchant's guardrails (`max_amount`, `allowed_categories`, `per_user_limit`, `max_discount_pct`).
+- `POST /merchant/{merchant_id}/deactivate` (or `DELETE`) — merchant deactivation / data subject right flow (wipes API keys, clears Razorpay credentials, sets product stock to 0, and anonymizes audit logs).
 - `POST /internal/campaigns/run` — manually trigger `campaign_graph` for a
   merchant (no scheduler yet; Celery Beat is a known gap — see below).
+- `POST /internal/retention/cleanup` — admin trigger for 90-day audit/agent-run retention purge.
 - `GET /observability/agent-runs` — list `AgentRun` rows (checkout, chat-checkout,
   or campaign executions), most recent first; optional `?merchant_id=` filter.
   Each row carries `langfuse_trace_id`, so it links directly to its trace.
@@ -287,6 +301,9 @@ section just orients you.
 
 ## What's implemented
 
+- **MCP Server (External Agent Integration)** — official Python FastMCP server (`apps/mcp-server`)
+  exposing `catalog_tool`, `checkout_tool`, and `chat_checkout_tool` over stdio (Claude Desktop)
+  and SSE transports, with a hybrid single-tenant default / multi-tenant override auth model.
 - **Agent-readable catalog** — `GET /agent/catalog`, discovery manifest, category/price filters.
 - **Policy-gated checkout** — `checkout_graph` (Input → ValidateCart →
   SuggestUpsell → CheckPolicy → CreateOrder → Finalize), fail-closed on any
@@ -298,6 +315,12 @@ section just orients you.
 - **Campaign orchestrator** — `campaign_graph` segments recent orders
   (failed / high-value), recommends actions, re-validates each against the
   *current* policy before logging.
+- **Safety Rails & Discount Guardrails** — configurable `max_discount_pct` ceiling (0–50%)
+  enforced across models and DB check constraints, plus validation preventing `per_user_limit > max_amount`.
+- **Payment & Data Sanitization** — automated regex and recursive scrubber (`data_sanitizer.py`)
+  guaranteeing card numbers (PANs), CVVs, expiry dates, and secret tokens are never logged or stored.
+- **Data Retention & Subject Deletion** — automated 90-day retention purge (`cleanup_retention.py`)
+  and full merchant deactivation/anonymization endpoint (`POST /merchant/{id}/deactivate`).
 - **Idempotency** — `Idempotency-Key`-based replay safety on checkout, with
   cart-mismatch detection (409) and an atomic INSERT..ON CONFLICT to close
   the concurrent-request race.
@@ -306,7 +329,7 @@ section just orients you.
 - **Observability** — Langfuse trace per agent run, `AgentRun` + `AuditLog`
   rows for every checkout/chat-checkout/campaign call, a dashboard page to browse both.
 - **Dashboard** — onboarding, catalog, policy, and observability pages, with
-  a persisted active-merchant switcher.
+  a persisted active-merchant switcher and compliance notice banner.
 
 ## Known gaps (deliberately deferred)
 

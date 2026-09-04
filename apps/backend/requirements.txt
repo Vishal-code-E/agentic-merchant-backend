@@ -6,8 +6,9 @@ sqlalchemy[asyncio]>=2.0
 asyncpg>=0.29
 psycopg2-binary>=2.9
 alembic>=1.13
-# Not imported anywhere yet — provisioned for the not-yet-built Celery Beat
-# scheduler (see README's Known Gaps); app/workers/tasks.py is still a stub.
+# redis: used by app/services/rate_limiter.py (redis.asyncio) for /agent/*
+# rate limiting. celery is still unused — provisioned for the not-yet-built
+# Celery Beat scheduler (see README's Known Gaps); app/workers/tasks.py is a stub.
 redis>=5.0
 celery>=5.4
 langgraph>=0.2

@@ -24,4 +24,5 @@ class Policy(Base, TimestampMixin):
     max_amount: Mapped[float] = mapped_column(Numeric(12, 2), nullable=True)
     allowed_categories: Mapped[list[str]] = mapped_column(ARRAY(String), default=list)
     per_user_limit: Mapped[float] = mapped_column(Numeric(12, 2), nullable=True)
+    max_discount_pct: Mapped[float] = mapped_column(Numeric(5, 2), default=30.0, nullable=False)
     rules_json: Mapped[dict] = mapped_column(JSONB, default=dict)

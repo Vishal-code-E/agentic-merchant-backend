@@ -7,6 +7,8 @@ from app.db.session import get_db
 from app.models.merchant import Merchant
 from app.models.policy import Policy
 from app.schemas.merchant import (
+    DeactivateMerchantRequest,
+    DeactivateMerchantResponse,
     MerchantResponse,
     OnboardMerchantRequest,
     OnboardMerchantResponse,
@@ -61,6 +63,7 @@ async def set_razorpay_keys(
         max_amount=payload.max_amount,
         allowed_categories=payload.allowed_categories,
         per_user_limit=payload.per_user_limit,
+        max_discount_pct=payload.max_discount_pct,
         rules_json={},
     )
     db.add(policy)
@@ -100,3 +103,94 @@ async def get_merchant(merchant_id: uuid.UUID, db: AsyncSession = Depends(get_db
     if merchant is None:
         raise HTTPException(status_code=404, detail="Merchant not found")
     return merchant
+
+
+@router.post("/merchant/{merchant_id}/deactivate", response_model=DeactivateMerchantResponse)
+@router.delete("/merchant/{merchant_id}", response_model=DeactivateMerchantResponse)
+async def deactivate_merchant(
+    merchant_id: uuid.UUID,
+    payload: DeactivateMerchantRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Merchant deactivation / data subject right flow (GDPR / DPDP compliance):
+    1. Soft-deletes the merchant: marks status='disabled' and sets deleted_at.
+    2. Revokes agent access: permanently deletes api_key_hash.
+    3. Wipes payment credentials: sets razorpay_key_secret and razorpay_key_id to NULL.
+    4. Sets product stock to 0 so no further purchases can occur.
+    5. Anonymizes customer PII across past AuditLog records if requested.
+    6. Retains order transaction summaries for statutory accounting and dispute obligations.
+    """
+    from datetime import datetime, timezone
+    from sqlalchemy import select, update
+    from app.models.agent_run import AgentRun
+    from app.models.audit_log import AuditLog
+    from app.models.order import Order
+    from app.models.product import Product
+
+    merchant = await db.get(Merchant, merchant_id)
+    if merchant is None:
+        raise HTTPException(status_code=404, detail="Merchant not found")
+
+    reason = payload.reason if payload else "Deactivated by merchant"
+    anonymize = payload.anonymize_audit_logs if payload else True
+
+    now = datetime.now(timezone.utc)
+    merchant.status = "disabled"
+    merchant.deleted_at = now
+    merchant.deactivated_reason = reason
+    merchant.api_key_hash = None
+    merchant.razorpay_key_secret = None
+    merchant.razorpay_key_id = None
+
+    # Zero stock on all products
+    await db.execute(
+        update(Product).where(Product.merchant_id == merchant_id).values(stock=0)
+    )
+
+    # Anonymize customer data in audit logs if requested
+    anonymized_count = 0
+    if anonymize:
+        runs_res = await db.execute(select(AgentRun.id).where(AgentRun.merchant_id == merchant_id))
+        run_ids = runs_res.scalars().all()
+        if run_ids:
+            logs_res = await db.execute(select(AuditLog).where(AuditLog.agent_run_id.in_(run_ids)))
+            audit_logs = logs_res.scalars().all()
+            for log in audit_logs:
+                if isinstance(log.payload_json, dict):
+                    modified = False
+                    new_payload = dict(log.payload_json)
+                    for key in ["customer_id", "user_id"]:
+                        if key in new_payload:
+                            new_payload[key] = "[ANONYMIZED_CUSTOMER]"
+                            modified = True
+                    if "customer_context" in new_payload and isinstance(new_payload["customer_context"], dict):
+                        new_payload["customer_context"] = {"customer_id": "[ANONYMIZED_CUSTOMER]"}
+                        modified = True
+                    if modified:
+                        log.payload_json = new_payload
+                        anonymized_count += 1
+
+    # Count retained records for receipt
+    orders_count_res = await db.execute(select(Order.id).where(Order.merchant_id == merchant_id))
+    retained_orders = len(orders_count_res.scalars().all())
+
+    runs_count_res = await db.execute(select(AgentRun.id).where(AgentRun.merchant_id == merchant_id))
+    retained_runs = len(runs_count_res.scalars().all())
+
+    await db.flush()
+
+    return DeactivateMerchantResponse(
+        merchant_id=merchant.id,
+        status=merchant.status,
+        deactivated_at=now,
+        retained_records={
+            "orders": retained_orders,
+            "agent_runs": retained_runs,
+            "anonymized_audit_logs": anonymized_count,
+        },
+        notice=(
+            "Merchant deactivated and credentials scrubbed. Order and transaction totals are "
+            "retained in anonymized form for statutory accounting/tax compliance."
+        ),
+    )

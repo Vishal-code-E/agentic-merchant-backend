@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import secrets
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -56,3 +57,13 @@ async def verify_agent_api_key(merchant_id: uuid.UUID, api_key: str | None, db: 
 
     if not hmac.compare_digest(hash_api_key(api_key), merchant.api_key_hash):
         raise HTTPException(status_code=401, detail=_INVALID_KEY_DETAIL)
+
+    if merchant.status == "disabled" or merchant.deleted_at is not None:
+        raise HTTPException(
+            status_code=403,
+            detail="Merchant account has been deactivated. Agent access is disabled.",
+        )
+
+    # Fire-and-forget: mutate the already-loaded row, no extra flush/commit here —
+    # it rides along in whichever commit the caller's request does anyway.
+    merchant.last_used_at = datetime.now(timezone.utc)

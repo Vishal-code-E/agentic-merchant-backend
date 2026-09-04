@@ -1,6 +1,7 @@
 import uuid
+from datetime import datetime
 
-from sqlalchemy import String
+from sqlalchemy import DateTime, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -29,3 +30,7 @@ class Merchant(Base, TimestampMixin):
     razorpay_key_secret: Mapped[str] = mapped_column(String(512), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="pending")  # pending|active|disabled
     api_key_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: Set on every successful verify_agent_api_key() call (see agent_auth.py) — a coarse "is this key still alive" signal.
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deactivated_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)

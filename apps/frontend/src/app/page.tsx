@@ -1,117 +1,234 @@
-import Link from "next/link";
+"use client";
 
-interface FlowStep {
-  number: string;
-  title: string;
-  description: string;
-  href: string;
-  cta: string;
-  primary?: boolean;
-}
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useRouter } from "next/navigation";
+import type {
+  ChatCheckoutRequest,
+  ChatCheckoutResponse,
+  RegenerateApiKeyResponse,
+} from "@agentic-merchant/shared-types";
+import { apiPost, ApiError } from "../lib/api";
+import { useMerchant } from "../lib/merchant-context";
 
-const FLOW: FlowStep[] = [
-  {
-    number: "01",
-    title: "Onboarding",
-    description:
-      "Connect a merchant's Razorpay test-mode keys and set its spending guardrails. This mints the merchant_id and agent API key everything below uses.",
-    href: "/onboarding",
-    cta: "Start onboarding",
-    primary: true,
-  },
-  {
-    number: "02",
-    title: "Catalog",
-    description:
-      "Add products to sell. This is the exact list an agent's GET /agent/catalog call will see.",
-    href: "/catalog",
-    cta: "Open catalog",
-  },
-  {
-    number: "03",
-    title: "Policies",
-    description:
-      "Set the spending ceiling, per-user limit, and allowed categories every checkout is checked against before it can pay.",
-    href: "/policies",
-    cta: "Adjust policies",
-  },
-  {
-    number: "04",
-    title: "Chat Checkout",
-    description:
-      "Type a plain-English order and watch it turn into a real, policy-checked cart — no structured JSON required. The most demo-worthy part of this whole thing.",
-    href: "/chat-checkout",
-    cta: "Try chat checkout",
-  },
-  {
-    number: "05",
-    title: "Observability",
-    description:
-      "Watch agent runs land in real time, and open any run's audit trail to see exactly why it was approved or denied.",
-    href: "/observability",
-    cta: "View activity",
-  },
-];
+type ChatEntry =
+  | { role: "user"; text: string }
+  | {
+      role: "system";
+      interpretation: string;
+      matched: boolean;
+      checkoutResult: ChatCheckoutResponse["checkoutResult"];
+    };
+
+const EXAMPLE_MESSAGES = ["I want 2 face washes under ₹400", "buy me a spaceship"];
 
 export default function Home() {
-  return (
-    <main className="container">
-      <section className="hero">
-        <h1>A store an AI shopping agent can actually buy from.</h1>
-        <p>
-          This backend gives a Razorpay merchant an agent-readable catalog, a policy-gated
-          checkout, and a full audit trail — everything an autonomous buyer needs to browse,
-          transact, and be trusted.
-        </p>
-        <div className="hero-actions">
-          <Link className="btn" href="/onboarding">
-            Start onboarding
-          </Link>
-          <a className="link-quiet" href="#how-it-works">
-            How this works ↓
-          </a>
-        </div>
-      </section>
+  const { merchantId, hydrated, agentApiKey, setAgentApiKey } = useMerchant();
+  const router = useRouter();
+  const [messages, setMessages] = useState<ChatEntry[]>([]);
+  const [input, setInput] = useState("");
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmingRegenerate, setConfirmingRegenerate] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
+  const [regenerateError, setRegenerateError] = useState<string | null>(null);
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
-      <section>
-        <p className="section-label">The flow</p>
-        <p className="section-intro">
-          Each step hands the next one what it needs — walk them in order the first time.
-        </p>
+  // Sign-in gate: no active merchant on a direct/refresh visit sends the visitor to onboard first.
+  useEffect(() => {
+    if (hydrated && !merchantId) {
+      router.replace("/onboarding");
+    }
+  }, [hydrated, merchantId, router]);
 
-        <div className="flow">
-          {FLOW.map((step) => (
-            <div className="flow-step" key={step.number}>
-              <span className="flow-step-number">{step.number}</span>
-              <div className="flow-step-body">
-                <h3>{step.title}</h3>
-                <p>{step.description}</p>
-              </div>
-              <div className="flow-step-action">
-                <Link className={step.primary ? "btn" : "btn-secondary"} href={step.href}>
-                  {step.cta}
-                </Link>
-              </div>
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, sending]);
+
+  async function sendMessage(text: string) {
+    const trimmed = text.trim();
+    if (!merchantId || !agentApiKey || !trimmed || sending) return;
+
+    setError(null);
+    setSending(true);
+    setMessages((prev) => [...prev, { role: "user", text: trimmed }]);
+    setInput("");
+
+    const payload: ChatCheckoutRequest = { merchantId, message: trimmed };
+    try {
+      const response = await apiPost<ChatCheckoutResponse>("/agent/chat-checkout", payload, {
+        "X-Agent-Api-Key": agentApiKey,
+      });
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "system",
+          interpretation: response.interpretation,
+          matched: response.matched,
+          checkoutResult: response.checkoutResult,
+        },
+      ]);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to reach the backend.");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    sendMessage(input);
+  }
+
+  async function handleGenerateKey() {
+    if (!merchantId) return;
+    setRegenerateError(null);
+    setRegenerating(true);
+    try {
+      const response = await apiPost<RegenerateApiKeyResponse>(
+        `/merchant/${merchantId}/api-key/regenerate`,
+        {}
+      );
+      setAgentApiKey(response.api_key);
+      setConfirmingRegenerate(false);
+    } catch (err) {
+      setRegenerateError(err instanceof ApiError ? err.message : "Failed to generate an API key.");
+    } finally {
+      setRegenerating(false);
+    }
+  }
+
+  // Gate pending or redirecting — render nothing rather than a flash of empty chat.
+  if (!hydrated || !merchantId) {
+    return null;
+  }
+
+  if (!agentApiKey) {
+    return (
+      <div className="chat-page">
+        <div className="chat-gate">
+          <div className="banner banner-warning">
+            <strong>No API key held for this browser session.</strong>
+            <div className="hint" style={{ marginTop: 4, marginBottom: 8 }}>
+              The agent API key is only ever shown once, at onboarding — a refresh, a new tab, or
+              onboarding in an earlier session all lose it. Generate a fresh one to continue.
             </div>
+            {!confirmingRegenerate ? (
+              <button type="button" className="btn-secondary" onClick={() => setConfirmingRegenerate(true)}>
+                Generate a fresh API key
+              </button>
+            ) : (
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <span className="hint">
+                  This immediately invalidates any key issued earlier for this merchant.
+                </span>
+                <button
+                  type="button"
+                  className="btn-danger"
+                  onClick={handleGenerateKey}
+                  disabled={regenerating}
+                >
+                  {regenerating ? "Generating..." : "Confirm"}
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => setConfirmingRegenerate(false)}
+                  disabled={regenerating}
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+            {regenerateError && (
+              <div className="banner banner-error" style={{ marginTop: 8 }}>
+                {regenerateError}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="chat-page">
+      <div className="chat-messages">
+        <div className="chip-row">
+          {EXAMPLE_MESSAGES.map((example) => (
+            <button
+              key={example}
+              type="button"
+              className="chip"
+              onClick={() => sendMessage(example)}
+              disabled={sending}
+            >
+              {example}
+            </button>
           ))}
         </div>
-      </section>
 
-      <section id="how-it-works" className="about">
-        <h2>How this works</h2>
-        <p>
-          Every onboarded merchant gets a machine-readable product catalog an agent can query
-          directly — no scraping, no guessing at what&apos;s in stock. A checkout only clears
-          after it&apos;s checked against that merchant&apos;s own spending ceiling, per-user
-          limit, and category rules, so an agent can&apos;t spend past what the merchant allowed.
-        </p>
-        <p>
-          Every request, policy decision, and Razorpay call is written to an audit trail tied to
-          a traceable run, so any approved or denied checkout can be explained after the fact.
-          It&apos;s the same trust boundary a human checkout enforces, built for a caller you
-          can&apos;t ask &ldquo;are you sure?&rdquo;
-        </p>
-      </section>
-    </main>
+        {error && <div className="banner banner-error">{error}</div>}
+
+        {messages.length === 0 && !sending ? (
+          <div className="chat-empty">
+            <div className="chat-empty-icon">💬</div>
+            <p>No messages yet — try an example above or type your own below.</p>
+          </div>
+        ) : (
+          <>
+            {messages.map((entry, i) =>
+              entry.role === "user" ? (
+                <div className="chat-bubble-user" key={i}>
+                  {entry.text}
+                </div>
+              ) : (
+                <div key={i} className={`chat-bubble-system ${entry.matched ? "matched" : "unmatched"}`}>
+                  <div>{entry.interpretation}</div>
+                  {entry.matched && entry.checkoutResult && (
+                    <div className="chat-order-detail">
+                      <span className="chat-order-badge">
+                        ✅ Order {entry.checkoutResult.razorpayOrderId ?? "(pending)"}
+                      </span>
+                      <span style={{ marginLeft: 8 }}>
+                        {entry.checkoutResult.amount} {entry.checkoutResult.currency}
+                      </span>
+                      {entry.checkoutResult.upsellSuggestions.length > 0 && (
+                        <div className="hint" style={{ marginTop: 6 }}>
+                          Suggested: {entry.checkoutResult.upsellSuggestions.map((p) => p.name).join(", ")}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )
+            )}
+            {sending && (
+              <div className="typing-indicator">
+                <span className="dot" />
+                <span className="dot" />
+                <span className="dot" />
+              </div>
+            )}
+            <div ref={chatEndRef} />
+          </>
+        )}
+      </div>
+
+      <div className="chat-input-bar">
+        <form className="chat-input-row" onSubmit={handleSubmit}>
+          <input
+            type="text"
+            placeholder="e.g. 2x face wash under ₹400"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            disabled={sending}
+            autoFocus
+          />
+          <button className="btn" type="submit" disabled={sending || !input.trim()}>
+            {sending ? "Sending…" : "Send"}
+          </button>
+        </form>
+      </div>
+    </div>
   );
 }

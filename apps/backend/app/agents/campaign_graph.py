@@ -2,8 +2,9 @@
 campaign_graph: LoadOrders -> SegmentCustomers -> RecommendActions -> ApplyPolicy -> EmitAudit
 
 Background revenue workflow, triggered manually for now via
-POST /internal/campaigns/run (see app/api/router_campaigns.py). v1.3 scope is
-rule-based only — no LLM call anywhere in this graph.
+POST /internal/campaigns/run (see app/api/router_campaigns.py). RecommendActions
+is LLM-reasoned as of this version (see app/services/growth_agent.py), with a
+rule-based fallback — every other node is unchanged from the v1.3 rule-based build.
 
 KNOWN GAP: Order has no customer_id column (see policy_engine.py's own note on
 per_user_limit), so segmentation and recommendations operate on orders, not
@@ -18,9 +19,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.state import CampaignState
+from app.models.merchant import Merchant
 from app.models.order import Order
 from app.models.policy import Policy
+from app.models.product import Product
 from app.services.audit_service import AuditService
+from app.services.growth_agent import recommend_campaign_actions
 from app.services.policy_engine import PolicyEngine
 
 DEFAULT_WINDOW_HOURS = 24
@@ -90,39 +94,49 @@ async def segment_customers_node(state: CampaignState, db: AsyncSession) -> Camp
     return state
 
 
-async def recommend_actions_node(state: CampaignState) -> CampaignState:
+async def recommend_actions_node(state: CampaignState, db: AsyncSession) -> CampaignState:
     """
-    Rule-based only, no LLM call:
-      failed_payment_recent -> "retry_nudge"
-      high_value_cart       -> "upsell_followup"
+    LLM-reasoned via growth_agent.recommend_campaign_actions (falls back to the
+    old rule-based map internally on any failure — see that module). It reasons
+    per segment, not per order; this node expands each segment-level
+    recommendation into one action per order in that segment, so ApplyPolicy
+    (unchanged) can still judge each against its own order's cart.
 
-    An order present in both segments gets both recommendations; ApplyPolicy
-    judges each independently.
+    No policy/merchant row means ApplyPolicy would drop everything anyway, so
+    the LLM call is skipped rather than reasoning over a dead end.
     """
     segments = state.get("segments") or {}
+    merchant_id = uuid.UUID(state["merchant_id"])
+
+    merchant = await db.get(Merchant, merchant_id)
+    policy_row = await _load_policy(db, state["merchant_id"])
+    if merchant is None or policy_row is None:
+        state["recommended_actions"] = []
+        return state
+
+    catalog_result = await db.execute(
+        select(Product).where(Product.merchant_id == merchant_id, Product.stock > 0)
+    )
+    catalog = catalog_result.scalars().all()
+
+    campaign_actions = await recommend_campaign_actions(segments, merchant, catalog, policy_row)
+
     recommended: list[dict] = []
-
-    for order in segments.get("failed_payment_recent", []):
-        recommended.append(
-            {
-                "order_id": order["id"],
-                "segment": "failed_payment_recent",
-                "action": "retry_nudge",
-                "amount": order["amount"],
-                "currency": order["currency"],
-            }
-        )
-
-    for order in segments.get("high_value_cart", []):
-        recommended.append(
-            {
-                "order_id": order["id"],
-                "segment": "high_value_cart",
-                "action": "upsell_followup",
-                "amount": order["amount"],
-                "currency": order["currency"],
-            }
-        )
+    for rec in campaign_actions:
+        for order in segments.get(rec.target_segment, []):
+            recommended.append(
+                {
+                    "order_id": order["id"],
+                    "segment": rec.target_segment,
+                    "action": rec.action,
+                    "amount": order["amount"],
+                    "currency": order["currency"],
+                    "reasoning": rec.reasoning,
+                    "confidence": rec.confidence,
+                    "suggested_discount_pct": rec.suggested_discount_pct,
+                    "path": rec.path,
+                }
+            )
 
     state["recommended_actions"] = recommended
     return state
@@ -146,10 +160,12 @@ async def apply_policy_node(state: CampaignState, db: AsyncSession) -> CampaignS
         state["actions"] = []
         return state
 
+    max_discount_pct = float(getattr(policy_row, "max_discount_pct", 30.0))
     policy = {
         "max_amount": policy_row.max_amount,
         "allowed_categories": list(policy_row.allowed_categories or []),
         "per_user_limit": policy_row.per_user_limit,
+        "max_discount_pct": max_discount_pct,
     }
 
     orders_by_id = {o["id"]: o for o in state.get("orders") or []}
@@ -157,6 +173,11 @@ async def apply_policy_node(state: CampaignState, db: AsyncSession) -> CampaignS
     kept: list[dict] = []
 
     for action in recommended:
+        # Discount guardrail: discard any recommendation exceeding policy discount ceiling
+        suggested_pct = action.get("suggested_discount_pct")
+        if suggested_pct is not None and float(suggested_pct) > max_discount_pct:
+            continue
+
         order = orders_by_id.get(action["order_id"]) or {}
         cart_items = order.get("cart_snapshot", {}).get("items", [])
         decision = engine.evaluate(cart_items, policy, customer_context=None)
@@ -169,7 +190,8 @@ async def apply_policy_node(state: CampaignState, db: AsyncSession) -> CampaignS
 
 async def emit_audit_node(state: CampaignState, db: AsyncSession) -> CampaignState:
     """audit_service.log_event(event_type="campaign_recommendation") for every
-    action that survived ApplyPolicy."""
+    action that survived ApplyPolicy — payload=action already carries reasoning/
+    confidence/path from recommend_actions_node, so no extra fields needed here."""
     audit_service = AuditService(db)
     agent_run_id = state.get("agent_run_id")
 
@@ -200,6 +222,9 @@ def build_campaign_graph(db: AsyncSession):
     async def _segment_customers(state: CampaignState) -> CampaignState:
         return await segment_customers_node(state, db)
 
+    async def _recommend_actions(state: CampaignState) -> CampaignState:
+        return await recommend_actions_node(state, db)
+
     async def _apply_policy(state: CampaignState) -> CampaignState:
         return await apply_policy_node(state, db)
 
@@ -209,7 +234,7 @@ def build_campaign_graph(db: AsyncSession):
     graph = StateGraph(CampaignState)
     graph.add_node("load_orders", _load_orders)
     graph.add_node("segment_customers", _segment_customers)
-    graph.add_node("recommend_actions", recommend_actions_node)
+    graph.add_node("recommend_actions", _recommend_actions)
     graph.add_node("apply_policy", _apply_policy)
     graph.add_node("emit_audit", _emit_audit)
 

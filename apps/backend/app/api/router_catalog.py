@@ -9,6 +9,7 @@ from app.models.merchant import Merchant
 from app.models.product import Product
 from app.schemas.product import AgentCatalogItem, ProductCreate, ProductResponse, ProductUpdate
 from app.services.agent_auth import verify_agent_api_key
+from app.services.rate_limiter import enforce_rate_limit
 
 router = APIRouter(tags=["catalog"])
 
@@ -63,10 +64,15 @@ async def agent_catalog(
     category: str | None = None,
     max_price: float | None = None,
     x_agent_api_key: str | None = Header(default=None, alias="X-Agent-Api-Key"),
+    # Accepted for parity with the checkout endpoints; catalog reads create no
+    # AgentRun/trace to attach them to, so they're accepted and otherwise unused.
+    x_agent_name: str | None = Header(default=None, alias="X-Agent-Name"),
+    x_agent_version: str | None = Header(default=None, alias="X-Agent-Version"),
     db: AsyncSession = Depends(get_db),
 ):
     """Agent-readable catalog endpoint: flat JSON array, no nested objects."""
     await verify_agent_api_key(merchant_id, x_agent_api_key, db)
+    await enforce_rate_limit("agent_catalog", x_agent_api_key)
 
     query = select(Product).where(Product.merchant_id == merchant_id)
     if category is not None:

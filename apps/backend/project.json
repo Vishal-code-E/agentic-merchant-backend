@@ -30,7 +30,7 @@
     "test": {
       "executor": "nx:run-commands",
       "options": {
-        "command": "pytest",
+        "command": "python3 -m pytest",
         "cwd": "apps/backend"
       }
     },

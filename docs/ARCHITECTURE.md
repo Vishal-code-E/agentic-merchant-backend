@@ -5,7 +5,8 @@ decisions, not an exhaustive reference. For the full request/response
 contract, use FastAPI's auto-generated `/docs`. For the original planning
 docs, see `03-dev-handoff-architecture-lld.md` and `04-graph-engineering.md`
 — this file describes what actually shipped, which in a few places (auth,
-idempotency, chat-checkout) goes beyond what those planning docs anticipated.
+idempotency, chat-checkout, the growth agent) goes beyond what those
+planning docs anticipated.
 
 ## `checkout_graph`: node flow
 
@@ -126,16 +127,69 @@ A "no confident match" result is `matched: false` with HTTP **200** — the
 agent asked for something this catalog can't satisfy, which is a normal
 outcome the caller needs to see clearly, not a server error to retry.
 
+## Growth Agent: `campaign_graph`'s RecommendActions
+
+`campaign_graph.py`'s `RecommendActions` node reasons with an LLM instead of
+a fixed rule map — `app/services/growth_agent.py`, same
+Anthropic/OpenAI structured-output pattern as `intent_parser.py` (schema-
+constrained JSON, provider chosen by `settings.model_provider`). Every other
+node (`LoadOrders`, `SegmentCustomers`, `ApplyPolicy`, `EmitAudit`) is
+unchanged.
+
+**What it reasons over.** `SegmentCustomers`' output (which of
+`failed_payment_recent`/`high_value_cart` currently have orders, as counts +
+total amounts — not raw order data), the merchant's real in-stock catalog
+(id/name/price/category), and its policy (`max_amount`,
+`allowed_categories`, `per_user_limit`). Recommendations are grounded in
+that real data, not generic marketing copy, and `target_segment` is
+enum-constrained to segments that actually have orders this run — the model
+is structurally unable to target an empty or nonexistent segment, the same
+trick `intent_parser.py` uses for `product_id`.
+
+**The discount guardrail.** `suggested_discount_pct` is constrained to
+`0`-`30` twice: in the JSON schema handed to the model, and again as a
+Pydantic field constraint (`ge=0, le=30`) on the parsed result — belt and
+suspenders, since a schema is a request to the provider, not a guarantee.
+Values outside that range fail validation and trigger the fallback below,
+same as any other unparseable output.
+
+**The fallback.** Any failure — missing/misconfigured provider key,
+network error, truncated response, or a parsed result that fails
+validation (an out-of-range discount, an unknown segment, a malformed
+field) — is caught inside `recommend_campaign_actions()` and never
+propagates: it falls back to the original v1.3 rule map
+(`failed_payment_recent → retry_nudge`, `high_value_cart → loyalty_offer`)
+so a campaign run degrades gracefully instead of failing outright. Which
+path produced each action (`llm_reasoning` vs `rule_based_fallback`) is
+recorded on the action itself and carried straight through to the
+`campaign_recommendation` audit row and the API response
+(`CampaignActionResult.path`) — this is deliberately visible, not swallowed,
+because "how often is this feature actually reasoning vs falling back" is
+itself operationally important to know.
+
+**ApplyPolicy is still the only gate.** The growth agent (or its fallback)
+only ever *proposes* — `RecommendActions` expands each segment-level
+recommendation into one candidate action per order in that segment, and
+`ApplyPolicy` (byte-for-byte unchanged) re-runs `PolicyEngine.evaluate()`
+against each order's real cart before anything survives to `EmitAudit`.
+Smarter reasoning about *which* action to propose changes nothing about
+*whether* it's allowed to reach the merchant — that check doesn't know or
+care whether an action came from the LLM or the rule-based fallback.
+
 ## How tracing and audit logging plug in
 
 **Langfuse** — each of `/agent/checkout`, `/agent/chat-checkout`, and
 `/internal/campaigns/run` is wrapped in `@observe()` (capture_input/output
 disabled and set explicitly, so the raw `AsyncSession` argument never leaks
-into a trace) inside a `propagate_attributes(trace_name=..., tags=[...])`
-block. The LangGraph `CallbackHandler` is passed as the graph's `config`, so
-every node in the run becomes a child span under that same trace
-automatically — chat-checkout's trace is tagged `["checkout", "chat"]` so
-it's identifiable as chat-originated without a separate dashboard.
+into a trace) inside a `propagate_attributes(trace_name=..., tags=[...],
+metadata={...}, environment=...)` block, all three carrying the same
+`merchant_id`/`endpoint`/`request_id` metadata and `environment` tag — the
+checkout endpoints add `agent_name`/`agent_version`/`idempotency_key` on top
+(see Security Model above). The LangGraph `CallbackHandler` is passed as the
+graph's `config`, so every node in the run becomes a child span under that
+same trace automatically — chat-checkout's trace is tagged `["checkout",
+"chat"]` so it's identifiable as chat-originated without a separate
+dashboard.
 
 **`AgentRun`** — one row per call, created before the graph runs and updated
 (`status`, `ended_at`) after. `langfuse_trace_id` is the *real* trace id from
@@ -147,10 +201,113 @@ specific decision points that need to be independently reconstructable:
 `policy_check` (every policy evaluation, allow or deny), `checkout_denied`,
 `checkout_idempotent_replay` / `checkout_idempotency_conflict`,
 `razorpay_order_created` / `razorpay_order_failed`, `intent_parsed`
-(chat-checkout only), and `campaign_recommendation`. These are `flush()`ed,
+(chat-checkout only), `suspicious_input_detected` (chat-checkout only — see
+Security Model below), and `campaign_recommendation` (now also carrying
+`reasoning`/`confidence`/`path` per action — see Growth Agent above). These are `flush()`ed,
 not `commit()`ed, inside `AuditService` — they ride the caller's own
 transaction, and become durable exactly when that transaction does. Anywhere
 a row needs to survive an `HTTPException` that follows it, the router
 commits explicitly first — `get_db()` rolls back the whole session on any
 exception, so an uncommitted "we're about to raise" write would otherwise be
 the first thing discarded.
+
+## Security Model
+
+**Auth.** See "Auth and idempotency model" above for the hashing/compare
+details. Added on top of that: `verify_agent_api_key` also stamps
+`Merchant.last_used_at` on every successful check — a mutation on the
+already-loaded row, no extra query or commit of its own, so it's free
+(rides whatever commit the request was already going to do). Regenerating a
+key (`POST /merchant/{id}/api-key/regenerate`) overwrites `api_key_hash` in
+place — confirmed there is no code path that keeps the old hash valid
+alongside the new one, so regeneration *is* revocation; no separate
+DELETE/revoke endpoint was needed.
+
+**Rate limiting.** Every `/agent/*` call is capped per API key via Redis
+(`app/services/rate_limiter.py`): 60/min on `agent/catalog`, 20/min on
+`agent/checkout`, 10/min on `agent/chat-checkout` (tightest because it's the
+one endpoint that costs an LLM call per request). Fixed-window counter, not
+a sliding log — cheaper, at the cost of allowing a burst across a window
+boundary; see that module's docstring. Fails **open**: if Redis is down or
+misconfigured, requests proceed unlimited and a warning is logged, rather
+than a side-car cache outage taking every agent endpoint down with it. That
+is a deliberate availability-over-strictness call for v1, not an oversight —
+it means the rate limit is a cost/abuse control, not something callers (or
+this system) should treat as a hard guarantee.
+
+**Chat-checkout's defense against prompt injection is layered, and the
+layers are not equally load-bearing:**
+
+1. *Structured output, enum-constrained to the real catalog*
+   (`intent_parser.py`) — the model is structurally unable to return a
+   `product_id` that doesn't exist in this merchant's catalog. This narrows
+   what a manipulated model *can* claim, but it is **not** the security
+   boundary — it's defense-in-depth.
+2. *The actual boundary*: `checkout_graph.validate_cart_node` re-derives
+   price, currency, and stock from the DB for every `product_id` regardless
+   of where the request came from (structured `/agent/checkout` or
+   LLM-parsed `/agent/chat-checkout`) — the request schema doesn't even have
+   a price field for the model to populate. `create_order_node` only ever
+   spends `state["amount"]`, which came from that DB lookup, never from
+   anything the model said. A compromised or successfully-jailbroken model
+   can at most cause a *legitimate, in-catalog, correctly-priced* cart to be
+   proposed — it cannot make the system charge an invented amount or a
+   nonexistent product.
+3. *Detection, not blocking*, on top of both: `intent_parser.py` rejects
+   messages over 500 chars before any model call (cost/DoS guard), and
+   flags known jailbreak phrasings (`"ignore previous instructions"`,
+   `"system prompt"`, etc.) via substring match. A match tags the Langfuse
+   trace (`suspicious_input=true`) and writes an `audit_logs` row
+   (`suspicious_input_detected`) — but does **not** refuse the request.
+   Blocking on a heuristic string match would false-positive on legitimate
+   text (e.g. "acting as a gift" contains no listed phrase, but a stricter
+   list easily catches innocent orders) and provides no real safety margin
+   anyway, since layer 2 doesn't trust the model's output regardless of
+   whether the message looked suspicious.
+
+**DB constraints.** `policies.max_amount`/`per_user_limit` (`> 0` when not
+NULL), `products.price`/`stock` (`>= 0`), `orders.amount` (`> 0`) are all
+enforced with `CHECK` constraints (migration `0007`), independent of the
+Pydantic layer above them — these hold even against a bug, a script, or a
+future admin tool that reaches the DB directly.
+
+**Agent identity.** `X-Agent-Name`/`X-Agent-Version` (optional, default
+`"unknown"`) are informational only — never checked, never a trust
+boundary — and are recorded three places for correlation: the `AgentRun`
+row (`agent_name`/`agent_version` columns, migration `0006`), the Langfuse
+trace metadata, and (alongside a fresh per-request `request_id` and
+`idempotency_key` when present) every propagated span under that trace.
+
+**Checked for secret leakage into logs/traces** (a real grep, not a
+formality): every `AuditService.log_event()` call site and every
+`langfuse.update_current_span()`/`propagate_attributes()` call in
+`app/agents/` and `app/api/` were read directly. None pass
+`Merchant.razorpay_key_secret`, `Merchant.api_key_hash`, the plaintext
+agent API key, `settings.encryption_key`, or any model-provider key into a
+payload/input/metadata dict — `@observe(capture_input=False,
+capture_output=False)` also means neither checkout endpoint's raw
+`AsyncSession`/header arguments get auto-captured. The one place an
+externally-sourced error string reaches an audit payload is
+`razorpay_order_failed`'s `"error": str(e)` — this wraps Razorpay's own API
+response body (auth is HTTP Basic via `razorpay.Client(auth=(key_id,
+key_secret))`, not echoed back in error text), not anything this codebase
+constructs from the secret itself; residual risk here is bounded by the
+Razorpay/Anthropic/OpenAI SDKs' own error-formatting behavior, not by
+application code.
+
+**Known gaps, not addressed tonight** (same honest framing as the
+`per_user_limit` gap above — a scope call, not an oversight):
+
+- **No least-privilege DB role.** The app connects as whatever role
+  `DATABASE_URL` names, with no separate read-only/limited role for anything.
+- **No OAuth/JWT.** Auth is a single static bearer key per merchant, not a
+  token with expiry, scopes, or refresh.
+- **No per-agent scoped permissions.** One API key authorizes everything a
+  merchant's agent integration can do; there's no narrower scope (e.g.
+  catalog-read-only) beneath the merchant level.
+- **No WAF/mTLS.** Nothing in front of the app enforces network-layer
+  identity or filters malicious traffic beyond the app-level rate limiter.
+- **Rate limiting fails open.** By design (see above) — an outage of Redis
+  itself is not a path to unlimited spend, since every checkout still goes
+  through policy + real Razorpay calls, but it does remove the abuse/cost
+  guard on `chat-checkout` specifically for as long as Redis is down.

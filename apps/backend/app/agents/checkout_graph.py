@@ -315,7 +315,10 @@ async def _resolve_idempotent_replay(
 
 
 async def create_order_node(state: CheckoutState, db: AsyncSession) -> CheckoutState:
-    """SELECT existing order by idempotency key first, then INSERT ... ON CONFLICT DO NOTHING to close the race atomically (a Session.begin_nested() SAVEPOINT doesn't reliably survive a failed flush() on this SQLAlchemy version)."""
+    """SELECT existing order by idempotency key first, then INSERT ... ON CONFLICT DO NOTHING to close the race atomically (a Session.begin_nested() SAVEPOINT doesn't reliably survive a failed flush() on this SQLAlchemy version).
+
+    Security boundary: amount/cart_items below are what ValidateCart re-priced from the DB, never what a caller (or an LLM, via chat-checkout) claimed — the enum-constrained product_id schema in intent_parser.py is defense-in-depth, not the boundary itself.
+    """
     merchant_id = uuid.UUID(state["merchant_id"])
     idempotency_key = state["idempotency_key"]
     cart_items = state.get("cart_items") or []

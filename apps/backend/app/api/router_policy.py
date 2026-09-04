@@ -48,6 +48,16 @@ async def update_policy(
 ):
     policy = await _load_policy(merchant_id, db)
 
+    # Cross-validate effective limits across existing values and partial updates
+    effective_max = payload.max_amount if payload.max_amount is not None else policy.max_amount
+    effective_user_limit = payload.per_user_limit if payload.per_user_limit is not None else policy.per_user_limit
+    if effective_max is not None and effective_user_limit is not None:
+        if float(effective_user_limit) > float(effective_max):
+            raise HTTPException(
+                status_code=422,
+                detail=f"per_user_limit ({effective_user_limit}) cannot exceed max_amount ({effective_max}).",
+            )
+
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(policy, field, value)
 
