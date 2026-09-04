@@ -2,22 +2,39 @@
 
 /**
  * Holds the "currently active merchant_id" so the catalog/policies/observability
- * pages don't each need it re-entered.
+ * pages don't each need it re-entered. Also resolves that id to the merchant's
+ * name (for the nav pill — a raw UUID isn't a legible "who am I working on"
+ * indicator) and caches it per id so switching back doesn't re-fetch.
  *
- * Persisted to localStorage (not just React state): a full page refresh —
- * common during local testing — would otherwise silently drop the active
- * merchant and make it look like re-onboarding is required. Read lazily via
- * useEffect rather than a useState initializer so the server-rendered and
- * first client-rendered pass still match (localStorage isn't available
- * during SSR) — this costs one render with merchantId=null right after
- * mount, before the stored value (if any) is applied.
+ * agentApiKey is deliberately plain React state, NOT persisted to localStorage:
+ * it's a live bearer credential (X-Agent-Api-Key), unlike merchantId which is
+ * not a secret. It's set once, right after onboarding or a regenerate call,
+ * and is lost on refresh/new tab by design — see chat-checkout/page.tsx's
+ * "generate a fresh key" fallback for that case. Callers that switch/forget
+ * the active merchant are responsible for clearing it themselves (see
+ * nav.tsx) — this file doesn't auto-clear it on merchantId change, to avoid
+ * wiping a key onboarding just set in the same update.
+ *
+ * merchantId is persisted to localStorage (not just React state): a full page
+ * refresh — common during local testing — would otherwise silently drop the
+ * active merchant and make it look like re-onboarding is required. Read
+ * lazily via useEffect rather than a useState initializer so the
+ * server-rendered and first client-rendered pass still match (localStorage
+ * isn't available during SSR) — this costs one render with merchantId=null
+ * right after mount, before the stored value (if any) is applied.
  */
 
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { apiGet } from "./api";
 
 interface MerchantContextValue {
   merchantId: string | null;
   setMerchantId: (id: string | null) => void;
+  /** null = not fetched/no merchant; undefined = fetch in flight. */
+  merchantName: string | null | undefined;
+  /** In-memory only — see module docstring. null = none held this session. */
+  agentApiKey: string | null;
+  setAgentApiKey: (key: string | null) => void;
 }
 
 const MerchantContext = createContext<MerchantContextValue | undefined>(undefined);
@@ -26,6 +43,9 @@ const STORAGE_KEY = "agentic-merchant:active-merchant-id";
 
 export function MerchantProvider({ children }: { children: ReactNode }) {
   const [merchantId, setMerchantIdState] = useState<string | null>(null);
+  const [merchantName, setMerchantName] = useState<string | null | undefined>(null);
+  const [agentApiKey, setAgentApiKey] = useState<string | null>(null);
+  const nameCache = useRef(new Map<string, string>());
 
   useEffect(() => {
     try {
@@ -37,6 +57,37 @@ export function MerchantProvider({ children }: { children: ReactNode }) {
       // localStorage unavailable (private browsing, disabled, etc.) — fall back to unset.
     }
   }, []);
+
+  useEffect(() => {
+    if (!merchantId) {
+      setMerchantName(null);
+      return;
+    }
+
+    const cached = nameCache.current.get(merchantId);
+    if (cached) {
+      setMerchantName(cached);
+      return;
+    }
+
+    let cancelled = false;
+    setMerchantName(undefined);
+    apiGet<{ name: string }>(`/merchant/${merchantId}`)
+      .then((merchant) => {
+        if (cancelled) return;
+        nameCache.current.set(merchantId, merchant.name);
+        setMerchantName(merchant.name);
+      })
+      .catch(() => {
+        // Name is a display nicety, not load-bearing — the pill falls back
+        // to a shortened id (see nav.tsx) rather than blocking on this.
+        if (!cancelled) setMerchantName(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [merchantId]);
 
   function setMerchantId(id: string | null) {
     setMerchantIdState(id);
@@ -52,7 +103,9 @@ export function MerchantProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <MerchantContext.Provider value={{ merchantId, setMerchantId }}>
+    <MerchantContext.Provider
+      value={{ merchantId, setMerchantId, merchantName, agentApiKey, setAgentApiKey }}
+    >
       {children}
     </MerchantContext.Provider>
   );

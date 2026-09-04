@@ -95,7 +95,9 @@ export default function PoliciesPage() {
   if (!merchantId) {
     return (
       <main className="container">
-        <h1>Policies</h1>
+        <header className="page-header">
+          <h1>Policies</h1>
+        </header>
         <div className="banner banner-warning">
           No merchant selected. Go to <a href="/onboarding">Onboarding</a> first.
         </div>
@@ -105,16 +107,26 @@ export default function PoliciesPage() {
 
   return (
     <main className="container">
-      <h1>Policies</h1>
-      <p className="muted">
-        Guardrails for merchant <code>{merchantId}</code>. Every checkout is evaluated against
-        these before any Razorpay call.
-      </p>
+      <header className="page-header">
+        <h1>Policies</h1>
+        <p className="page-subtitle">
+          Guardrails for merchant <code>{merchantId}</code>. Every checkout is evaluated against
+          these before any Razorpay call.
+        </p>
+      </header>
 
       {error && <div className="banner banner-error">{error}</div>}
       {saved && <div className="banner banner-success">Policy updated.</div>}
 
-      {loading && <p className="muted">Loading...</p>}
+      {loading && (
+        <div className="card">
+          <div className="skeleton-row">
+            <div className="skeleton" />
+            <div className="skeleton" />
+            <div className="skeleton" />
+          </div>
+        </div>
+      )}
 
       {!loading && form && policy && (
         <form className="card" onSubmit={handleSubmit}>
@@ -156,7 +168,7 @@ export default function PoliciesPage() {
           </div>
 
           <button className="btn" type="submit" disabled={saving}>
-            {saving ? "Saving..." : "Save policy"}
+            {saving ? "Saving…" : "Save policy"}
           </button>
         </form>
       )}

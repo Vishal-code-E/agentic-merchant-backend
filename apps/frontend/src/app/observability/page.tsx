@@ -22,10 +22,16 @@ function AuditLogRow({ agentRunId }: { agentRunId: string }) {
   }, [agentRunId]);
 
   return (
-    <tr>
+    <tr className="audit-row">
       <td colSpan={5}>
         {error && <div className="banner banner-error">{error}</div>}
-        {!error && logs === null && <p className="muted">Loading audit logs...</p>}
+        {!error && logs === null && (
+          <div className="skeleton-row">
+            <div className="skeleton" />
+            <div className="skeleton" />
+            <div className="skeleton" />
+          </div>
+        )}
         {logs && logs.length === 0 && <p className="muted">No audit log entries for this run.</p>}
         {logs && logs.length > 0 && (
           <table>
@@ -39,7 +45,9 @@ function AuditLogRow({ agentRunId }: { agentRunId: string }) {
             <tbody>
               {logs.map((log) => (
                 <tr key={log.id}>
-                  <td>{log.eventType}</td>
+                  <td>
+                    <span className="badge badge-success">{log.eventType}</span>
+                  </td>
                   <td>
                     <code>{JSON.stringify(log.payload)}</code>
                   </td>
@@ -93,7 +101,9 @@ export default function ObservabilityPage() {
   if (!merchantId) {
     return (
       <main className="container">
-        <h1>Observability</h1>
+        <header className="page-header">
+          <h1>Observability</h1>
+        </header>
         <div className="banner banner-warning">
           No merchant selected. Go to <a href="/onboarding">Onboarding</a> first.
         </div>
@@ -103,18 +113,27 @@ export default function ObservabilityPage() {
 
   return (
     <main className="container">
-      <h1>Observability</h1>
-      <p className="muted">
-        Agent runs for merchant <code>{merchantId}</code>. Click a row to see its audit trail.
-      </p>
+      <header className="page-header">
+        <h1>Observability</h1>
+        <p className="page-subtitle">
+          Agent runs for merchant <code>{merchantId}</code>. Click a row to see its audit trail.
+        </p>
+      </header>
 
       {error && <div className="banner banner-error">{error}</div>}
 
       <div className="card">
         {loading ? (
-          <p className="muted">Loading...</p>
+          <div className="skeleton-row">
+            <div className="skeleton" />
+            <div className="skeleton" />
+            <div className="skeleton" />
+          </div>
         ) : runs.length === 0 ? (
-          <p className="muted">No agent runs yet — try /agent/checkout or /internal/campaigns/run.</p>
+          <div className="empty-state">
+            <div className="empty-state-icon">📊</div>
+            <p>No agent runs yet — try <code>/agent/checkout</code> or <code>/internal/campaigns/run</code>.</p>
+          </div>
         ) : (
           <table>
             <thead>
@@ -130,7 +149,7 @@ export default function ObservabilityPage() {
               {runs.map((run) => (
                 <Fragment key={run.id}>
                   <tr
-                    className="row-expand"
+                    className={`row-expand ${expanded === run.id ? "expanded" : ""}`}
                     onClick={() => setExpanded(expanded === run.id ? null : run.id)}
                   >
                     <td>{run.type}</td>

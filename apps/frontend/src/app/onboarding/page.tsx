@@ -32,7 +32,7 @@ const TEST_RAZORPAY_KEY_ID = process.env.NEXT_PUBLIC_TEST_RAZORPAY_KEY_ID;
 const TEST_RAZORPAY_KEY_SECRET = process.env.NEXT_PUBLIC_TEST_RAZORPAY_KEY_SECRET;
 
 export default function OnboardingPage() {
-  const { setMerchantId } = useMerchant();
+  const { setMerchantId, setAgentApiKey } = useMerchant();
   const [form, setForm] = useState<FormState>(initialForm);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -82,6 +82,7 @@ export default function OnboardingPage() {
       setResult(response);
       setApiKey(response.api_key);
       setMerchantId(response.merchant.id);
+      setAgentApiKey(response.api_key); // makes chat-checkout usable right away, same session
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Something went wrong. Is the backend running?");
     } finally {
@@ -99,6 +100,7 @@ export default function OnboardingPage() {
         {}
       );
       setApiKey(response.api_key);
+      setAgentApiKey(response.api_key);
       setCopied(false);
       setConfirmingRegenerate(false);
     } catch (err) {
@@ -120,11 +122,13 @@ export default function OnboardingPage() {
 
   return (
     <main className="container">
-      <h1>Onboarding</h1>
-      <p className="muted">
-        Connect a merchant's Razorpay test-mode keys and set its initial policy. A merchant cannot
-        exist without a policy — both are created together.
-      </p>
+      <header className="page-header">
+        <h1>Onboarding</h1>
+        <p className="page-subtitle">
+          Connect a merchant&apos;s Razorpay test-mode keys and set its initial policy. A
+          merchant cannot exist without a policy — both are created together.
+        </p>
+      </header>
 
       {error && <div className="banner banner-error">{error}</div>}
 
@@ -149,18 +153,8 @@ export default function OnboardingPage() {
               <code>/agent/checkout</code> calls. If you lose it, regenerate a new one below —
               that immediately invalidates this one.
             </div>
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <code
-                style={{
-                  flex: 1,
-                  padding: "8px 10px",
-                  background: "var(--color-surface)",
-                  border: "1px solid var(--color-warning-border)",
-                  borderRadius: 6,
-                  userSelect: "all",
-                  wordBreak: "break-all",
-                }}
-              >
+            <div className="api-key-box">
+              <code className="api-key-value">
                 {apiKey}
               </code>
               <button type="button" className="btn-secondary" onClick={handleCopyApiKey}>
@@ -188,7 +182,7 @@ export default function OnboardingPage() {
                     onClick={handleRegenerate}
                     disabled={regenerating}
                   >
-                    {regenerating ? "Regenerating..." : "Confirm regenerate"}
+                    {regenerating ? "Regenerating…" : "Confirm regenerate"}
                   </button>
                   <button
                     type="button"
@@ -292,7 +286,7 @@ export default function OnboardingPage() {
           </div>
 
           <button className="btn" type="submit" disabled={submitting}>
-            {submitting ? "Onboarding..." : "Onboard merchant"}
+            {submitting ? "Onboarding…" : "Onboard merchant"}
           </button>
         </form>
       )}

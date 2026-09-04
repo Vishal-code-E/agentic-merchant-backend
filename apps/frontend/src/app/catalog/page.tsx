@@ -115,7 +115,9 @@ export default function CatalogPage() {
   if (!merchantId) {
     return (
       <main className="container">
-        <h1>Catalog</h1>
+        <header className="page-header">
+          <h1>Catalog</h1>
+        </header>
         <div className="banner banner-warning">
           No merchant selected. Go to <a href="/onboarding">Onboarding</a> first.
         </div>
@@ -125,7 +127,13 @@ export default function CatalogPage() {
 
   return (
     <main className="container">
-      <h1>Catalog</h1>
+      <header className="page-header">
+        <h1>Catalog</h1>
+        <p className="page-subtitle">
+          Products your policy and agents can see. Changes take effect immediately — this is the
+          exact list <code>GET /agent/catalog</code> returns.
+        </p>
+      </header>
 
       {error && <div className="banner banner-error">{error}</div>}
 
@@ -207,16 +215,23 @@ export default function CatalogPage() {
         </div>
 
         <button className="btn" type="submit" disabled={submitting}>
-          {submitting ? "Adding..." : "Add product"}
+          {submitting ? "Adding…" : "Add product"}
         </button>
       </form>
 
       <div className="card">
         <h2>Products</h2>
         {loading ? (
-          <p className="muted">Loading...</p>
+          <div className="skeleton-row">
+            <div className="skeleton" />
+            <div className="skeleton" />
+            <div className="skeleton" />
+          </div>
         ) : products.length === 0 ? (
-          <p className="muted">No products yet.</p>
+          <div className="empty-state">
+            <div className="empty-state-icon">📦</div>
+            <p>No products yet — add the first one above.</p>
+          </div>
         ) : (
           <table>
             <thead>
@@ -232,7 +247,7 @@ export default function CatalogPage() {
             <tbody>
               {products.map((p) => (
                 <tr key={p.id}>
-                  <td>{p.name}</td>
+                  <td><strong>{p.name}</strong></td>
                   <td>{p.category ?? <span className="muted">—</span>}</td>
                   <td>
                     {p.price} {p.currency}
