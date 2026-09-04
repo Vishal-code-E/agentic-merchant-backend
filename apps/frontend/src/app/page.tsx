@@ -1,23 +1,21 @@
-import type { Merchant } from "@agentic-merchant/shared-types";
-
-// Placeholder data shaped by the shared type — proves frontend/backend share
-// a single source of truth for the Merchant contract. Real fetch wiring is v1.4.
-const placeholderMerchant: Merchant = {
-  id: "merchant_demo",
-  name: "Demo Merchant",
-  razorpayKeyId: null,
-  status: "pending",
-};
+import Link from "next/link";
 
 export default function Home() {
   return (
-    <main style={{ padding: "2rem", fontFamily: "sans-serif" }}>
+    <main className="container">
       <h1>Agentic Merchant Dashboard</h1>
-      <p>Skeleton only. Pages to build: /onboarding, /catalog, /policies, /observability.</p>
-      <p>
-        Sample merchant (typed via <code>@agentic-merchant/shared-types</code>):{" "}
-        {placeholderMerchant.name} — {placeholderMerchant.status}
-      </p>
+      <div className="card">
+        <p>
+          Start at <Link href="/onboarding">Onboarding</Link> to connect a merchant's Razorpay
+          test-mode keys and set its policy — that gives you the <code>merchant_id</code> the rest
+          of the dashboard uses.
+        </p>
+        <p className="muted">
+          Then use <Link href="/catalog">Catalog</Link> to add products,{" "}
+          <Link href="/policies">Policies</Link> to adjust guardrails, and{" "}
+          <Link href="/observability">Observability</Link> to inspect agent runs and audit logs.
+        </p>
+      </div>
     </main>
   );
 }

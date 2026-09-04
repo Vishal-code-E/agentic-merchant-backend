@@ -3,6 +3,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app.api import (
@@ -46,6 +47,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Browser-only protection — curl/httpx never hit this, only requests sent
+# from a page running in a browser (e.g. the dashboard on localhost:3000).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_allowed_origins_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @app.get("/ping", tags=["health"])
 async def ping():
@@ -60,8 +71,14 @@ async def health_db():
     return {"status": "ok"}
 
 
-app.include_router(router_onboarding.router, prefix=settings.api_v1_prefix)
+# Registration order matters: FastAPI/Starlette matches routes in the order
+# they were added, with no static-vs-dynamic specificity scoring. router_catalog's
+# static "/merchant/products" must be registered before router_onboarding's
+# dynamic "/merchant/{merchant_id}" — both are two path segments, so a
+# GET /merchant/products request would otherwise match the dynamic route first,
+# with "products" failing UUID validation as merchant_id (422).
 app.include_router(router_catalog.router, prefix=settings.api_v1_prefix)
+app.include_router(router_onboarding.router, prefix=settings.api_v1_prefix)
 app.include_router(router_checkout.router, prefix=settings.api_v1_prefix)
 app.include_router(router_policy.router, prefix=settings.api_v1_prefix)
 app.include_router(router_observability.router, prefix=settings.api_v1_prefix)

@@ -49,11 +49,22 @@ class Settings(BaseSettings):
     openai_api_key: str = Field(default="")
     gemini_api_key: str = Field(default="")
 
+    # --- CORS ---
+    # Comma-separated list of origins allowed to call the API from a browser
+    # (see app/main.py's CORSMiddleware). Defaults to just the local frontend
+    # dev server so this isn't hardcoded for production later.
+    cors_allowed_origins: str = Field(default="http://localhost:3000")
+
     # --- Security ---
     secret_key: str = Field(default="change-me-in-prod")
     # Fernet key used to encrypt merchant Razorpay secrets at rest. No default —
     # must fail at startup in prod rather than silently storing plaintext.
     encryption_key: str = Field(default="")
+
+    @property
+    def cors_allowed_origins_list(self) -> list[str]:
+        """cors_allowed_origins, split on commas and trimmed, for CORSMiddleware(allow_origins=...)."""
+        return [origin.strip() for origin in self.cors_allowed_origins.split(",") if origin.strip()]
 
     @model_validator(mode="after")
     def _require_encryption_key_in_prod(self) -> "Settings":
