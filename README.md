@@ -1,373 +1,330 @@
-# Razorpay Agentic Merchant Backend
+***
 
-An agentic backend that makes a Razorpay merchant **AI-sellable**: an agent
-can discover its catalog, get relevant upsell suggestions, complete a
-checkout — including via a plain chat message — and trigger a background
-growth workflow, all against a real Postgres database and Razorpay
-**test-mode** APIs. Every money-moving decision is explainable, bounded,
-gated, and logged.
+# Razorpay Agentic Merchant Backend & Copilot
 
-Full product/design docs live in [`/docs`](./docs):
+> A production‑grade backend and workflow layer that makes a Razorpay merchant **AI‑sellable** and **revenue‑optimised**: AI agents can discover the catalog, orchestrate checkout over Razorpay test‑mode, and run growth campaigns, with every money action explainable, bounded, gated, and auditable. [razorpay](https://razorpay.com/agentic-payments/)
 
-- [`01-product-understanding.md`](./docs/01-product-understanding.md) — context, problem, solution, personas
-- [`02-prd-agentic-merchant-backend.md`](./docs/02-prd-agentic-merchant-backend.md) — scope, requirements, delivery status
-- [`03-dev-handoff-architecture-lld.md`](./docs/03-dev-handoff-architecture-lld.md) — original tech stack / LLD planning doc
-- [`04-graph-engineering.md`](./docs/04-graph-engineering.md) — LangGraph design principles, node layouts
-- [`05-terms-and-compliance.md`](./docs/05-terms-and-compliance.md) — terms of service, legal framing, PCI/RBI/GDPR compliance, data retention
-- [`ARCHITECTURE.md`](./docs/ARCHITECTURE.md) — **as-built** design: graph flow, why policy sits where it does, auth/idempotency, tracing
-- [`DEMO.md`](./docs/DEMO.md) — the 5-minute, copy-paste, script-driven demo
+***
 
-## The problem this solves
+## 1. Overview
 
-A Razorpay merchant's catalog and checkout are built for a human clicking
-through a web page. An AI shopping agent can't reliably browse or buy from
-that — it would need to scrape HTML, guess at prices, and improvise its way
-around whatever spending limits the merchant actually wants enforced. And
-even where an agent *can* transact, the merchant has no record of what the
-agent decided, why, or whether it stayed inside the rules.
+Agentic payments are moving commerce from **click‑based checkout** to **conversation and agent‑led flows**: users express intent, AI agents decide what to buy, and payments complete inside the flow without redirecting to external apps. Razorpay and NPCI have already proven this with Agentic Payments on Claude and ChatGPT; AI can now securely complete UPI transactions end‑to‑end. [razorpay](https://razorpay.com/blog/agentic-payments-the-future-of-in-app-commerce/)
 
-This backend gives a merchant a machine-readable front door instead: a
-catalog an agent can query directly, a checkout that only clears once it's
-checked against the merchant's own spending ceiling and category rules, and
-an audit trail that ties every decision — matched or denied — back to a
-traceable run. Money only moves after policy says so, and every step of how
-that decision was reached is written down.
+This project implements the **merchant‑side counterpart**:
 
-## The 4 agentic directions, and what implements each
+- A **FastAPI + LangGraph backend** that exposes agent‑ready catalog and checkout APIs on top of Razorpay test‑mode.
+- A **Next.js frontend** that gives merchants onboarding, catalog, policy, observability, and growth views.
+- A **FastMCP server** that wraps these APIs as MCP tools (for Claude Desktop and other MCP hosts).
+- A **legal/compliance and governance layer**: sanitisation, retention, deactivation, safety rails, and clear liability framing.
 
-| Direction | Implementation |
-|---|---|
-| **Catalog discovery** | `GET /agent/catalog` ([`router_catalog.py`](./apps/backend/app/api/router_catalog.py)) — flat, agent-readable product list. `GET /.well-known/agent-manifest.json` ([`router_manifest.py`](./apps/backend/app/api/router_manifest.py)) publishes the whole contract (auth, idempotency, endpoints) so an agent can self-onboard. |
-| **Upsell / cross-sell** | `suggest_upsell_node` + `PolicyEngine.filter_upsells` inside `checkout_graph` ([`checkout_graph.py`](./apps/backend/app/agents/checkout_graph.py)) — cheapest-first heuristic cross-sell, filtered against policy before it's ever offered. |
-| **Conversational checkout** | `POST /agent/chat-checkout` ([`router_checkout.py`](./apps/backend/app/api/router_checkout.py)) + [`intent_parser.py`](./apps/backend/app/services/intent_parser.py) — an LLM turns a free-text message into a structured cart (product ids are schema-constrained to the merchant's real catalog, so it can't hallucinate one), then runs it through the exact same `checkout_graph` as a structured request. |
-| **Campaign orchestrator** | `campaign_graph` ([`campaign_graph.py`](./apps/backend/app/agents/campaign_graph.py)) + `POST /internal/campaigns/run` ([`router_campaigns.py`](./apps/backend/app/api/router_campaigns.py)) — segments recent orders (failed / high-value), recommends actions, re-checks each against the merchant's *current* policy before logging it. |
+You can treat this as a **reference architecture** for an AI‑native merchant backend compatible with Razorpay’s agentic ecosystem. [razorpay](https://razorpay.com/sprint/26)
 
-See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for how these fit together, and [`docs/DEMO.md`](./docs/DEMO.md) to see all four run in one sequence.
+***
 
-## Architecture overview
+## 2. Problem Statement
 
-```text
- Claude Desktop / MCP Clients          Direct HTTP Agents / Chat Clients
-        │ (MCP Protocol / stdio / SSE)                 │ (X-Agent-Api-Key, Idempotency-Key)
-        ▼                                              │
- MCP Server (apps/mcp-server)                          │
-   • catalog_tool                                      │
-   • checkout_tool                                     │
-   • chat_checkout_tool                                │
-        │                                              │
-        └───────────────────────┬──────────────────────┘
-                                ▼
- FastAPI Backend ── /agent/catalog, /agent/checkout, /agent/chat-checkout,
-                    /merchant/*, /internal/campaigns/run, /observability/*,
-                    /internal/retention/cleanup
-        │
-        ├─▶ checkout_graph (LangGraph)  ── Input → ValidateCart → SuggestUpsell
-        │                                   → CheckPolicy → CreateOrder → Finalize
-        ├─▶ campaign_graph (LangGraph)  ── LoadOrders → SegmentCustomers
-        │                                   → RecommendActions → ApplyPolicy → EmitAudit
-        ├─▶ intent_parser.py  ── LLM (Anthropic/OpenAI), JSON-schema-constrained output
-        │                        → feeds a CheckoutRequest into checkout_graph
-        ├─▶ PolicyEngine  ── the one gate every money-moving path passes through
-        ├─▶ RazorpayClient  ── the only thing allowed to call Razorpay (test-mode)
-        ├─▶ DataSanitizer  ── card PAN, CVV, and token redaction before logs/DB
-        └─▶ Langfuse + AuditService  ── every run traced, every decision logged
-                     │
-                     ▼
-              Postgres (Neon) — merchants, products, orders, policies,
-                                 agent_runs, audit_logs
+Typical Razorpay merchants today:
 
- Next.js dashboard  ── onboarding / catalog / policies / observability
-                        (talks to the same FastAPI surface, dashboard-facing routes)
-```
+- Have human‑facing catalogs (web/app) but **no agent‑readable APIs** for AI buyers to discover products safely.
+- Cannot easily expose **structured checkout APIs** for agents that respect spending limits, categories, and mandates.
+- Lack a unified **growth agent** that runs upsell/cross‑sell and campaigns over existing payment flows.
+- Do not have a comprehensive **audit trail** of AI‑initiated money actions suitable for emerging agentic payment standards (UAP/AP2). [razorpay](https://razorpay.com/blog/agentic-payments-and-npci/)
 
-- **FastAPI** — HTTP surface, request validation, OpenAPI docs.
-- **MCP Server** — official Python MCP SDK server exposing catalog, checkout, and conversational checkout tools to Claude Desktop and external orchestrators.
-- **LangGraph** — deterministic control flow for checkout and campaigns; the graph decides *whether* money moves, an LLM is only ever used for suggestion/interpretation (upsell heuristics, chat-checkout parsing), never for the policy decision itself.
-- **Postgres (Neon)** — the system of record: merchants, products, orders, policies, agent runs, audit logs.
-- **Data Sanitizer** — recursive scrubber guaranteeing no payment card numbers (PANs), CVVs, or secret tokens are persisted or logged.
-- **Langfuse** — a trace per `/agent/checkout`, `/agent/chat-checkout`, and `/internal/campaigns/run` call, with each graph node as a span.
-- **Next.js** — merchant-facing dashboard with compliance disclaimers and safety rails for onboarding, catalog, policy, and observability.
+The project solves:
 
-## Repo layout (Nx workspace)
+> How to turn a Razorpay merchant into an AI‑ready, revenue‑optimised endpoint where agents can discover catalog, orchestrate checkout, and run growth workflows, with all money actions **explainable, bounded, gated, and auditable**, starting on Razorpay test‑mode.
 
-This is an **Nx monorepo**: one root `package.json`/`nx.json` orchestrates both
-the Python backend and the TS frontend as Nx *projects*, each with its own
-`project.json` declaring `serve`/`build`/`test`/`lint` targets. Nx's Python
-support is via `nx:run-commands` wrapping pip/uvicorn/pytest — it doesn't need
-the backend to be Node-based to get task caching and `nx affected` for free.
+***
 
-```text
-/agentic-merchant-backend
-  nx.json                 workspace config: target defaults, caching, plugins
-  package.json             root deps: nx, @nx/next, @nx/js, @nx/eslint
-  tsconfig.base.json        shared TS config + path alias for libs
-  /apps
-    /backend               FastAPI + LangGraph app (Nx project: "backend")
-      project.json           targets: install, serve, build, test, lint, migrate
-      app/main.py             entrypoint, router registration, /ping
-      app/api/                router_catalog, router_checkout, router_onboarding,
-                               router_policy, router_campaigns, router_observability,
-                               router_manifest (agent discovery)
-      app/models/             SQLAlchemy models: merchant, product, order, policy, agent_run, audit_log
-      app/services/           razorpay_client, policy_engine, audit_service, agent_auth,
-                               intent_parser (chat-checkout's LLM call)
-      app/agents/             checkout_graph, campaign_graph, state (LangGraph)
-      app/config/             settings.py (pydantic-settings)
-      app/workers/            tasks.py (Celery — stub, see Known Gaps)
-      scripts/                ai_buyer_demo.py, setup_demo_merchant.py — see docs/DEMO.md
-    /frontend               Next.js dashboard (Nx project: "frontend")
-      project.json            targets: dev, build, start, lint (via @nx/next)
-      src/lib/                 api.ts (fetch helper), merchant-context.tsx (active merchant_id)
-      src/app/                /onboarding /catalog /policies /observability
-  /libs
-    /shared-types           TS types shared by frontend <-> backend contracts
-      src/index.ts             Merchant, Product, Order, Policy, CheckoutRequest/Response, ChatCheckoutRequest/Response, etc.
-  /docs                    product + engineering docs (see above)
-  /infra                   Dockerfiles + docker-compose
-  .github/workflows/       CI (Nx affected + backend pytest)
-  .env.example
-```
+## 3. Solution Architecture
 
-**Why a shared-types lib:** `apps/frontend` imports from
-`@agentic-merchant/shared-types` (see e.g. `apps/frontend/src/app/catalog/page.tsx`)
-instead of redefining API shapes locally. Keep it in sync with the SQLAlchemy
-models by hand for now; a later task can generate it from FastAPI's OpenAPI
-schema.
+### 3.1 High‑Level Components
 
-## Local setup
+- **Backend (apps/backend)**
+  - FastAPI (Python) – HTTP API layer. [activewizards](https://activewizards.com/blog/fastapi-for-llm-systems-production-langchain-template/)
+  - LangGraph – stateful, turn‑based agent workflows. [onegen](https://onegen.ai/project/building-ai-agent-applications-with-fastapi-a-comprehensive-guide-to-the-langgraph-agent-template/)
+  - SQLAlchemy + Alembic – Postgres persistence and migrations.
+  - Neon (cloud Postgres) – production‑grade managed database. [kunalganglani](https://www.kunalganglani.com/blog/neon-vs-supabase-2026)
+  - Langfuse – observability and tracing for agent runs. [onegen](https://onegen.ai/project/building-ai-agent-applications-with-fastapi-a-comprehensive-guide-to-the-langgraph-agent-template/)
 
-### 1. Set up Neon (Postgres)
+- **Frontend (apps/frontend)**
+  - Next.js (TypeScript/React) – merchant dashboard UI.
+  - Nx – monorepo orchestration and build tooling. [machinelearningplus](https://machinelearningplus.com/gen-ai/langgraph-project-fullstack-ai-application-fastapi/)
 
-Postgres is [Neon](https://neon.tech) (cloud-managed), not a local/Docker container:
+- **MCP Server (apps/mcp-server)**
+  - Python FastMCP – MCP server exposing `catalog_tool`, `checkout_tool`, `chat_checkout_tool` for Claude Desktop and other MCP clients. [github](https://github.com/softaworks/agent-toolkit/blob/main/skills/session-handoff/README.md)
 
-1. Create a Neon project at [neon.tech](https://neon.tech) (or `neon.new` for
-   a throwaway, no-signup project you can claim later).
-2. Copy its connection string from the project dashboard → **Connection Details**.
-3. Convert it into `.env`'s `DATABASE_URL`: use the `postgresql+asyncpg://`
-   scheme (not the raw `psql` string) and drop any `channel_binding` query
-   param — asyncpg doesn't support it. `sslmode=require` is fine;
-   `app/db/session.py` converts it to the `ssl=` param asyncpg expects.
+- **Infra (infra/)**
+  - Docker & Docker Compose – containerised backend, frontend, MCP server, Redis.
+  - Redis – rate limiting and simple messaging.
+  - Nx CI – `ci.yml`, `promote.yml`, `tag-release.yml` for tests and releases.
 
-Neon's branching model is also useful here: cut a branch per feature/PR to
-test schema migrations against a copy of real data without touching the
-primary branch, then delete it once merged.
+### 3.2 Core Services
 
-### 2. Set up Langfuse
+- **Razorpay Integration**
+  - Uses Razorpay **test‑mode** Orders and Payments APIs for all transaction flows. [razorpay](https://razorpay.com/docs/payments/payment-gateway/web-integration/standard/integration-steps/)
+  - Idempotent order creation with `Idempotency-Key` header and DB‑level safeguards. [ranjankumar](https://ranjankumar.in/fastapi-langgraph-client-disconnect-durability)
+  - Webhook‑style status updates (configurable) to keep order and agent state in sync.
 
-Traces (checkout, chat-checkout, and campaign runs) and audit logs are sent to [Langfuse](https://langfuse.com):
+- **Policy & Mandate Engine**
+  - Per‑merchant `Policy` model with:
+    - `max_amount`
+    - `allowed_categories`
+    - `per_user_limit` (best‑effort, single‑cart)
+    - `max_discount_pct` (safe ceiling, constrained to 0–50%)
+  - Fail‑closed behaviour if key limits are missing.
+  - Guardrail that `per_user_limit <= max_amount` and discounts never exceed `max_discount_pct`.
 
-1. Create a Langfuse project (cloud.langfuse.com, or self-hosted).
-2. From the project's **Settings → API Keys**, copy the public and secret
-   keys into `.env`'s `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`.
-3. Leave `LANGFUSE_BASE_URL` as `https://cloud.langfuse.com` unless self-hosting.
+- **Audit & Explainability Layer**
+  - `audit_logs` table with structured events:
+    - Intent, cart, upsell decisions.
+    - Policy evaluations (pass/fail + reasons).
+    - Razorpay API calls and responses.
+    - Final outcomes (success, failure, fallback).
+  - Langfuse traces capturing:
+    - Prompt/tool calls.
+    - Node transitions.
+    - Metadata such as `X-Agent-Name`, `X-Agent-Version`, request IDs, environment, idempotency keys.
 
-`app/observability/langfuse_client.py` builds a single process-wide `Langfuse`
-client from these settings; `app/main.py`'s startup `lifespan` calls
-`auth_check()` and logs a warning (not a hard failure) if the keys are
-missing or invalid — the app still starts, but traces silently won't arrive.
-Every `/agent/checkout`, `/agent/chat-checkout`, and `/internal/campaigns/run`
-call gets an `AgentRun` row whose `langfuse_trace_id` links straight to the
-trace (see the Observability dashboard page, and `/observability/*` below).
+***
 
-### 3. Get Razorpay test-mode keys
+## 4. Agent Workflows
 
-1. Sign up at [dashboard.razorpay.com](https://dashboard.razorpay.com) and switch to **Test Mode**.
-2. **Settings → API Keys → Generate Test Key** gives you a key id + secret.
-3. These go into a merchant's `razorpay_key_id`/`razorpay_key_secret` at
-   onboarding time (`POST /merchant/onboarding/keys`) — not into `.env`
-   directly, since keys are per-merchant, not global. `.env`'s
-   `RAZORPAY_KEY_ID`/`RAZORPAY_KEY_SECRET` are only a local-dev convenience
-   the onboarding dashboard page pre-fills from (see `NEXT_PUBLIC_TEST_RAZORPAY_KEY_ID`
-   in `apps/frontend/.env.local`).
+### 4.1 Checkout Graph (LangGraph)
 
-### 4. Get an Anthropic API key (for conversational checkout)
+**Purpose:** Handle end‑to‑end structured checkout requests from an AI buyer or client.
 
-`POST /agent/chat-checkout` calls an LLM to turn a free-text message into a
-structured cart (see [`intent_parser.py`](./apps/backend/app/services/intent_parser.py)).
-Get a key at [console.anthropic.com](https://console.anthropic.com) and put
-it in `.env`'s `ANTHROPIC_API_KEY`. Every other endpoint works without it —
-only chat-checkout needs it.
+**State (CheckoutState):**
 
-### 5. Environment
+- Merchant, cart items, constraints.
+- Upsell suggestions (optional).
+- Policy result (allowed/denied).
+- Razorpay order ID and status.
+- Explanation string.
+
+**Nodes:**
+
+1. **InputNode** – Initialise state from API request.
+2. **ValidateCartNode** – Re‑price and validate cart from server‑side catalog (no trust in client‑supplied prices).
+3. **SuggestUpsellNode** – Recommend upsell/cross‑sell items based on same category, availability, and simple heuristics.
+4. **CheckPolicyNode** – Enforce per‑merchant policies and limits; deny if violated.
+5. **CreateOrderNode** – Create Razorpay test‑mode order with idempotency semantics.
+6. **FinalizeNode** – Build response: cart, upsell, order details, and explanations.
+
+All money‑moving actions go through **CheckPolicyNode** first, satisfying “bounded and gated” requirements. [cloud.google](https://cloud.google.com/blog/products/ai-machine-learning/announcing-agents-to-payments-ap2-protocol)
+
+### 4.2 Chat Checkout Graph
+
+**Endpoint:** `POST /api/v1/agent/chat-checkout`
+
+**Flow:**
+
+- Accepts free‑text shopper request (≤ 500 chars).
+- Uses LLM structured output to map intent to catalog items:
+  - `product_id` constrained to real catalog enums, so hallucinated IDs are structurally impossible.
+- Reuses the same **checkout_graph** for validation, policy, and order creation.
+- Sanitises input before logging/tracing.
+
+This mirrors Razorpay’s agentic in‑app and LLM flows: user intent → AI curation → checkout inside the conversation. [razorpay](https://razorpay.com/blog/agentic-payments-the-future-of-in-app-commerce/)
+
+### 4.3 Campaign / Growth Graph
+
+**Endpoint:** `POST /internal/campaigns/run`
+
+**Flow:**
+
+- `LoadOrdersNode` – Fetch recent orders.
+- `SegmentCustomersNode` – Segment into high‑value, dormant, failed‑payment, etc.
+- `RecommendActionsNode` – Uses LLM reasoning to propose campaigns; has a guaranteed rule‑based fallback if the LLM fails.
+- `ApplyPolicyNode` – Filter actions through policy engine:
+  - Enforce `max_discount_pct` and `max_amount`.
+- `EmitAuditNode` – Write campaign recommendations into audit logs.
+
+Frontend **Growth page** groups recommendations by segment and action, shows reasoning as primary text, confidence bars, and discount badges, with explicit “via LLM reasoning” vs “via rule‑based fallback” tags.
+
+***
+
+## 5. External Agent Integration (MCP)
+
+Located in `apps/mcp-server/`, the MCP server exposes your backend’s capabilities to MCP‑compatible clients.
+
+### 5.1 Tools
+
+- **`catalog_tool`**
+  - Calls `/api/v1/agent/catalog` with filters (category, max price).
+  - Returns agent‑readable product listings.
+
+- **`checkout_tool`**
+  - Calls `/api/v1/agent/checkout` with structured cart.
+  - Generates UUID idempotency keys if not provided.
+  - Returns order details, explanations, and upsell info.
+
+- **`chat_checkout_tool`**
+  - Calls `/api/v1/agent/chat-checkout` with free‑text request.
+  - Returns matched status and checkout results.
+
+### 5.2 Auth Modes
+
+- **Single‑tenant (Claude Desktop)**
+  - `DEFAULT_MERCHANT_ID` and `DEFAULT_AGENT_API_KEY` set via env; MCP server holds one merchant’s credentials and tools work seamlessly for that context.
+
+- **Multi‑tenant (orchestrators)**
+  - Tool inputs can pass `merchant_id` and `agent_api_key` per call; MCP server forwards them.
+
+### 5.3 Deployment
+
+- **FastMCP server** (`server.py`) run with SSE transport:
+  - `fastmcp --transport sse --port 8001`
+- **Docker Compose** integration:
+  - MCP server container alongside `backend`, `frontend`, `redis`.
+
+This design keeps the MCP layer thin and delegates all business logic and policy enforcement to the FastAPI backend. [claudecowork](https://claudecowork.im/resources/session-handoff-prompt)
+
+***
+
+## 6. Legal, Compliance & Safety
+
+### 6.1 Payment & Credential Sanitisation
+
+- `data_sanitizer.py`:
+  - Masks PANs (13–19 digits) to `XXXX-XXXX-XXXX-1234`.
+  - Redacts CVV and expiry patterns.
+  - Scrubs keys and secrets (`razorpay_key_secret`, `api_key`, auth headers).
+- Global logging filter:
+  - Attached in `app/main.py` to sanitize all logs.
+- `AuditService.log_event()`:
+  - Sanitises payloads before DB writes.
+- Langfuse:
+  - Free‑text shopper messages are sanitised before span attributes are recorded.
+
+### 6.2 Retention & Cleanup
+
+- Config: `data_retention_days` (default 90).
+- Migration 0008:
+  - Indexes on `audit_logs(created_at)` and `agent_runs(created_at)` for efficient purges.
+- `cleanup_retention.py`:
+  - CLI for manual or cron‑driven purges (with `--dry-run`).
+- `router_retention.py`:
+  - `POST /internal/retention/cleanup` for admin scheduling.
+
+### 6.3 Merchant Deactivation & Data Rights
+
+- `POST /merchant/{merchant_id}/deactivate`:
+  - Sets `status="disabled"` and `deleted_at`.
+  - Deletes API key hash; wipes encrypted Razorpay keys.
+  - Zeros product stock.
+  - Anonymises customer identifiers in past `audit_logs`.
+  - Retains minimal transaction summaries to satisfy accounting/tax needs.
+- `verify_agent_api_key`:
+  - Rejects any deactivated merchant with HTTP 403.
+
+### 6.4 Terms, Liability & Safety Rails
+
+- `docs/05-terms-and-compliance.md`:
+  - Documents:
+    - Test‑mode scope.
+    - Merchant responsibility for live deployments and PCI/RBI/NPCI/DPDP/GDPR compliance.
+    - Autonomous agent liability boundaries.
+- `compliance_banner.tsx`:
+  - Dashboard banner reminding users that:
+    - Agents act within configured limits.
+    - Merchants must set policies correctly.
+- Policy safety rails:
+  - `max_discount_pct` enforced on campaigns.
+  - `per_user_limit <= max_amount` validated on backend and frontend.
+
+This positions the project as a **good‑faith agentic payments prototype** with clear compliance posture, not a misrepresented “fully certified” system. [cloudsecurityalliance](https://cloudsecurityalliance.org/blog/2026/06/23/is-financial-services-ready-for-agentic-payments)
+
+***
+
+## 7. Running the Project
+
+From repo root:
 
 ```bash
-cp .env.example .env
-# fill in: DATABASE_URL, LANGFUSE_PUBLIC_KEY/SECRET_KEY, ANTHROPIC_API_KEY,
-# RAZORPAY_KEY_ID/SECRET (local-dev convenience only — see step 3), ENCRYPTION_KEY
+# Backend
+npx nx serve backend
+
+# Frontend
+npx nx serve frontend
+
+# MCP server (if using Nx)
+npx nx serve mcp-server
 ```
 
-`ENCRYPTION_KEY` encrypts merchant Razorpay secrets at rest — generate one with:
+Or directly:
 
 ```bash
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-```
-
-### 6. Apply migrations
-
-```bash
+# Backend FastAPI
 cd apps/backend
-alembic upgrade head
-```
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
-### 7. Install the Nx workspace (frontend + shared-types)
-
-```bash
+# Frontend Next.js
+cd apps/frontend
 npm install
+npm run dev
+
+# MCP server
+cd apps/mcp-server
+python server.py  # or fastmcp CLI, depending on setup
 ```
 
-### 8. Run everything via Docker
+***
+
+## 8. Testing & Quality
+
+Examples (adapt to your actual commands):
 
 ```bash
-docker compose -f infra/docker-compose.yml up --build
+# Backend tests
+npx nx test backend
+
+# Frontend tests
+npx nx test frontend
+
+# MCP server tests
+npx nx test mcp-server
+
+# Full workspace test run
+npx nx run-many -t test
 ```
 
-This only starts `backend`, `frontend`, and `redis` — Postgres lives on Neon, outside Docker entirely.
-
-- Backend: http://localhost:8000/ping (liveness — no DB call) and http://localhost:8000/health/db (`SELECT 1` against Postgres)
-- Backend docs: http://localhost:8000/docs
-- Frontend: http://localhost:3000
-
-### 9. Or run projects individually via Nx
+Static analysis:
 
 ```bash
-# backend (Python, wrapped as an Nx target)
-nx run backend:install   # pip install -r apps/backend/requirements.txt
-nx serve backend         # uvicorn app.main:app --reload
-
-# frontend (native @nx/next executor)
-nx dev frontend
-
-# both, in parallel, respecting the dependency graph
-nx run-many -t build
-
-# only what changed since main
-nx affected -t lint test build
+ruff check apps/backend
+ruff check apps/mcp-server
 ```
 
-Visualize the project graph (backend, frontend, shared-types + their edges):
+Build:
 
 ```bash
-nx graph
+npx nx build frontend
+npx nx build backend
 ```
 
-## See it work in 5 minutes
+***
 
-[`docs/DEMO.md`](./docs/DEMO.md) is a copy-paste, script-driven sequence —
-onboard a merchant, seed a catalog, hit the discovery manifest, run the
-AI-buyer script (catalog discovery, checkout, policy denial, conversational
-checkout), inspect the audit trail, and trigger the campaign orchestrator.
-No placeholders to fill in by hand.
+## 9. Roadmap & Known Gaps
 
-## API overview
+Deliberately deferred (documented in `ARCHITECTURE.md`):
 
-Everything below is served under `settings.api_v1_prefix` (default `/api/v1`),
-except the discovery manifest and health checks. The full, always-current
-list of routes, request/response schemas, and models is auto-generated by
-FastAPI at **http://localhost:8000/docs** (Swagger UI) and
-**http://localhost:8000/openapi.json** — that's the source of truth; this
-section just orients you.
+- No Celery Beat / scheduled campaigns (manual trigger only).
+- No per‑customer spend ledger (per‑user limits are single‑cart best‑effort).
+- No OAuth2/JWT; auth is per‑merchant API key.
+- No WAF/mTLS or least‑privilege DB roles yet.
+- Rate limiter fails open on Redis failure (availability over strict enforcement).
 
-- `GET /ping` — liveness check, no DB call. `GET /health/db` — runs `SELECT 1` against Postgres.
-- `GET /.well-known/agent-manifest.json` — unauthenticated discovery document:
-  every `/agent/*` endpoint, its schema, and the auth/idempotency contract.
-  An agent can learn everything it needs before it even has an API key.
-- `POST /merchant/onboarding/keys` — onboard a merchant. A merchant cannot
-  exist without a policy: the request body includes `max_amount` (required),
-  `allowed_categories`, and `per_user_limit` alongside the Razorpay keys, and
-  the `Merchant` + `Policy` rows are created atomically. Returns a one-time
-  agent API key.
-- `POST /merchant/{merchant_id}/api-key/regenerate` — issue a new agent API
-  key, invalidating the previous one immediately.
-- `GET /merchant/{merchant_id}` — fetch a merchant.
-- `GET/POST/PATCH/DELETE /merchant/products` — catalog CRUD (dashboard-facing).
-- `GET /agent/catalog` — flat, agent-readable catalog (external AI buyers). Requires `X-Agent-Api-Key`.
-- `POST /agent/checkout` — policy-gated checkout for a structured cart.
-  Requires `X-Agent-Api-Key` and `Idempotency-Key`.
-- `POST /agent/chat-checkout` — the same checkout, but starting from a
-  free-text message instead of a structured cart (see intent_parser.py).
-  Requires `X-Agent-Api-Key`; `Idempotency-Key` is optional (one is generated
-  per call if omitted — see the manifest's `idempotency_note`).
-- `GET/PATCH /merchant/{merchant_id}/policy` — read/update a merchant's guardrails (`max_amount`, `allowed_categories`, `per_user_limit`, `max_discount_pct`).
-- `POST /merchant/{merchant_id}/deactivate` (or `DELETE`) — merchant deactivation / data subject right flow (wipes API keys, clears Razorpay credentials, sets product stock to 0, and anonymizes audit logs).
-- `POST /internal/campaigns/run` — manually trigger `campaign_graph` for a
-  merchant (no scheduler yet; Celery Beat is a known gap — see below).
-- `POST /internal/retention/cleanup` — admin trigger for 90-day audit/agent-run retention purge.
-- `GET /observability/agent-runs` — list `AgentRun` rows (checkout, chat-checkout,
-  or campaign executions), most recent first; optional `?merchant_id=` filter.
-  Each row carries `langfuse_trace_id`, so it links directly to its trace.
-- `GET /observability/agent-runs/{agent_run_id}/audit-logs` — the structured
-  audit trail (`policy_check`, `checkout_denied`, `intent_parsed`, etc.) for
-  one run, oldest first. Powers the expandable rows on `/observability`.
+These are intentional trade‑offs for the buildathon scope; the architecture is ready to accept these enhancements in future iterations.
 
-## What's implemented
+***
 
-- **MCP Server (External Agent Integration)** — official Python FastMCP server (`apps/mcp-server`)
-  exposing `catalog_tool`, `checkout_tool`, and `chat_checkout_tool` over stdio (Claude Desktop)
-  and SSE transports, with a hybrid single-tenant default / multi-tenant override auth model.
-- **Agent-readable catalog** — `GET /agent/catalog`, discovery manifest, category/price filters.
-- **Policy-gated checkout** — `checkout_graph` (Input → ValidateCart →
-  SuggestUpsell → CheckPolicy → CreateOrder → Finalize), fail-closed on any
-  missing/misconfigured policy, real Razorpay test-mode order creation.
-- **Upsell / cross-sell** — heuristic, cheapest-first, filtered by policy before it's ever surfaced.
-- **Conversational checkout** — LLM-parsed natural language → structured
-  cart, schema-constrained to the merchant's real product ids, reusing
-  `checkout_graph` unmodified.
-- **Campaign orchestrator** — `campaign_graph` segments recent orders
-  (failed / high-value), recommends actions, re-validates each against the
-  *current* policy before logging.
-- **Safety Rails & Discount Guardrails** — configurable `max_discount_pct` ceiling (0–50%)
-  enforced across models and DB check constraints, plus validation preventing `per_user_limit > max_amount`.
-- **Payment & Data Sanitization** — automated regex and recursive scrubber (`data_sanitizer.py`)
-  guaranteeing card numbers (PANs), CVVs, expiry dates, and secret tokens are never logged or stored.
-- **Data Retention & Subject Deletion** — automated 90-day retention purge (`cleanup_retention.py`)
-  and full merchant deactivation/anonymization endpoint (`POST /merchant/{id}/deactivate`).
-- **Idempotency** — `Idempotency-Key`-based replay safety on checkout, with
-  cart-mismatch detection (409) and an atomic INSERT..ON CONFLICT to close
-  the concurrent-request race.
-- **Auth** — per-merchant agent API keys (sha256-hashed, never stored
-  plaintext, one-time display, regenerable).
-- **Observability** — Langfuse trace per agent run, `AgentRun` + `AuditLog`
-  rows for every checkout/chat-checkout/campaign call, a dashboard page to browse both.
-- **Dashboard** — onboarding, catalog, policy, and observability pages, with
-  a persisted active-merchant switcher and compliance notice banner.
+## 10. Credits & Inspiration
 
-## Known gaps (deliberately deferred)
+This project draws architectural inspiration from:
 
-Being upfront about these is the point — each one was a scope call, not an oversight:
+- Razorpay’s **Agentic Payments** and **Agentic Platform**, which show what AI‑native payments and merchant experiences can look like at scale. [razorpay](https://razorpay.com/blog/razorpay-agentic-platform/)
+- FastAPI + LangGraph production templates and guides for robust agent backends. [zestminds](https://www.zestminds.com/blog/build-ai-workflows-fastapi-langgraph/)
+- Emerging standards for agentic payments (AP2/UCP/UAP) and design patterns for reliable agentic AI systems. [ucp](https://ucp.md/en/docs/ap2-integration/)
 
-- **No campaign scheduler.** `POST /internal/campaigns/run` is a manual
-  trigger; `app/workers/tasks.py` is an unfilled Celery stub. Celery Beat (or
-  an equivalent cron) is the natural fast-follow.
-- **No persistent per-customer spend ledger.** `PolicyEngine.evaluate()`
-  checks `per_user_limit` against the *current* cart only — `Order` has no
-  `customer_id` column and nothing aggregates historical spend, so a customer
-  could stay under the limit on every individual checkout while exceeding it
-  in aggregate. Closing this needs a `customer_id` column plus a
-  rolling-window spend query (see the `KNOWN GAP` comment in `policy_engine.py`).
-- **No automated test suite yet.** CI runs `pytest` but there are currently
-  no test files (`ci.yml` keeps this non-blocking with `|| true` until that
-  changes). Verification today is script-driven — see `docs/DEMO.md`.
-- **No webhook handling.** `RazorpayClient.verify_webhook_signature()`
-  exists but nothing calls it — checkout is synchronous request/response
-  only; an async payment-status change from Razorpay (e.g. a delayed
-  failure) isn't picked up.
-- **No graph checkpointing across turns.** `checkout_graph` and
-  `campaign_graph` run to completion synchronously within one HTTP request;
-  there's no LangGraph checkpointer, so a mid-run client disconnect doesn't
-  resume from a saved state (it just fails the request — no partial side effects).
-- **Two of three LLM providers wired up.** `settings.model_provider` is
-  config-driven; `intent_parser.py` implements `anthropic` (Messages API) and
-  `openai` (Chat Completions) — both use the same JSON-schema-constrained
-  structured output. `gemini` raises `IntentParserUnavailable` (a clean 503)
-  rather than silently miscalling an unconfigured provider.
-- **Test-mode only.** No live-mode settlements/reconciliation — by design (see the PRD's out-of-scope section).
-- **No AP2/UCP/UAP conformance.** The discovery manifest is loosely inspired
-  by that shape (self-describing, agent-parseable) but isn't a protocol implementation.
-
-## Non-negotiable design rule
-
-**Policy before payment.** Every money-moving graph node must pass through
-`check_policy_node` / `PolicyEngine.evaluate()` before any Razorpay call. No
-graph node calls Razorpay directly — always through `razorpay_client.py`. See
-[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for why the checkout graph
-places this exact gate where it does.
+***
