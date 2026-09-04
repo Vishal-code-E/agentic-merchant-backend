@@ -10,6 +10,11 @@ class CheckoutState(TypedDict, total=False):
     #: Set by router_checkout before invoking the graph; nodes use it to tag
     #: audit_logs rows against the right AgentRun.
     agent_run_id: str | None
+    #: Caller's Idempotency-Key header (router_checkout 400s before invoking
+    #: the graph if it's missing, so by the time a node sees this it's always
+    #: set). create_order_node checks it against Order.idempotency_key before
+    #: calling Razorpay.
+    idempotency_key: str
     upsell_suggestions: list[dict[str, Any]] | None
     policy_result: dict[str, Any] | None
     order_id: str | None

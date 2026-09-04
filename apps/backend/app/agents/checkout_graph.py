@@ -255,12 +255,52 @@ async def check_policy_node(state: CheckoutState, db: AsyncSession) -> CheckoutS
 
 async def create_order_node(state: CheckoutState, db: AsyncSession) -> CheckoutState:
     """
-    Create a local Order row, then call RazorpayClient.create_order() using the
-    Order's own id as the receipt (idempotency key). Razorpay SDK errors are
-    left to propagate so the router can map them to a 502 — but are audited
+    True idempotency check first: if an Order already exists for this
+    merchant_id + idempotency_key, return its result verbatim instead of
+    creating a new one or calling Razorpay again. This is stronger than the
+    receipt=str(order.id) passed to Razorpay below, which only makes
+    Razorpay's own order creation idempotent on Razorpay's side — it does
+    nothing to stop a second local Order row (and a second real charge) if
+    the caller retries before this request ever reaches Razorpay.
+
+    Otherwise: create a local Order row, then call RazorpayClient.create_order()
+    using the Order's own id as the receipt. Razorpay SDK errors are left to
+    propagate so the router can map them to a 502 — but are audited
     (event_type="razorpay_order_failed") before they're re-raised.
     """
-    merchant = await db.get(Merchant, uuid.UUID(state["merchant_id"]))
+    merchant_id = uuid.UUID(state["merchant_id"])
+    idempotency_key = state["idempotency_key"]
+
+    existing = await db.execute(
+        select(Order)
+        .where(Order.merchant_id == merchant_id, Order.idempotency_key == idempotency_key)
+        .limit(1)
+    )
+    existing_order = existing.scalars().first()
+    if existing_order is not None:
+        await AuditService(db).log_event(
+            agent_run_id=state.get("agent_run_id"),
+            event_type="checkout_idempotent_replay",
+            payload={"order_id": str(existing_order.id), "idempotency_key": idempotency_key},
+        )
+        state["order_id"] = str(existing_order.id)
+        state["razorpay_order_id"] = existing_order.razorpay_order_id
+        state["amount"] = float(existing_order.amount)
+        state["currency"] = existing_order.currency
+        if existing_order.status == "success":
+            state["status"] = "success"
+        else:
+            # Original attempt failed before ever reaching Razorpay (or Razorpay
+            # itself errored) — don't retry it silently on the caller's behalf.
+            state["status"] = "failed"
+            state["failure_stage"] = "create_order"
+            state["explanation"] = (
+                f"Idempotency-Key {idempotency_key!r} matches a previously failed order; "
+                "not retrying automatically. Use a new Idempotency-Key to retry."
+            )
+        return state
+
+    merchant = await db.get(Merchant, merchant_id)
     if merchant is None:
         state["status"] = "failed"
         state["failure_stage"] = "create_order"
@@ -276,6 +316,7 @@ async def create_order_node(state: CheckoutState, db: AsyncSession) -> CheckoutS
         amount=amount,
         currency=currency,
         cart_snapshot={"items": state.get("cart_items", [])},
+        idempotency_key=idempotency_key,
     )
     db.add(order)
     await db.flush()

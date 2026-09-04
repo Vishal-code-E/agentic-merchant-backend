@@ -74,6 +74,30 @@ export interface OnboardMerchantResponse {
   merchant: Merchant;
   policy: Policy;
   keys_valid: boolean;
+  /**
+   * Plaintext agent API key — present in this response ONLY. It is never
+   * returned again by any endpoint (only its hash is stored server-side);
+   * losing it means re-onboarding for a new one. See AgentAuthHeader.
+   */
+  api_key: string;
+}
+
+/**
+ * Required on every /agent/* call (GET /agent/catalog, POST /agent/checkout).
+ * Value is OnboardMerchantResponse.api_key. A missing/invalid key gets a 401.
+ */
+export interface AgentAuthHeader {
+  "X-Agent-Api-Key": string;
+}
+
+/**
+ * Required in addition to AgentAuthHeader on POST /agent/checkout. A
+ * caller-generated unique string per checkout attempt — retrying with the
+ * same key returns the original order instead of creating a duplicate. A
+ * missing header gets a 400.
+ */
+export interface IdempotencyHeader {
+  "Idempotency-Key": string;
 }
 
 export type AgentRunType = "checkout" | "campaign";
@@ -97,7 +121,11 @@ export interface AuditLogEntry {
   createdAt: string;
 }
 
-/** Request body for POST /agent/checkout */
+/**
+ * Request body for POST /agent/checkout. The request also requires the
+ * headers in AgentAuthHeader and IdempotencyHeader — neither is part of
+ * this body shape, but both are required on every call.
+ */
 export interface CheckoutCartItem {
   productId: string;
   quantity: number;

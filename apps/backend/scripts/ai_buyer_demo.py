@@ -12,14 +12,22 @@ it doubles as a live demo, not just a smoke test:
     4. Builds a cart that deliberately exceeds max_amount and checks out again
        — failure case, prints the policy denial reason
 
+Every /agent/* call carries an X-Agent-Api-Key header (required on both
+/agent/catalog and /agent/checkout), and every checkout additionally carries
+a fresh Idempotency-Key header (required; a missing one gets a 400) — see
+GET /.well-known/agent-manifest.json for the full contract.
+
 Usage:
-    python scripts/ai_buyer_demo.py --merchant-id <uuid> [--base-url http://localhost:8000]
+    python scripts/ai_buyer_demo.py --merchant-id <uuid> --api-key <key> \
+        [--base-url http://localhost:8000]
 
 Or via env vars:
-    MERCHANT_ID=<uuid> BASE_URL=http://localhost:8000 python scripts/ai_buyer_demo.py
+    MERCHANT_ID=<uuid> AGENT_API_KEY=<key> BASE_URL=http://localhost:8000 \
+        python scripts/ai_buyer_demo.py
 
-Get a merchant_id by onboarding one first: POST /merchant/onboarding/keys,
-or the /onboarding dashboard page.
+Get a merchant_id + api_key by onboarding one first: POST
+/merchant/onboarding/keys, or the /onboarding dashboard page. The api_key is
+returned once, at onboarding time, and never shown again.
 """
 from __future__ import annotations
 
@@ -27,6 +35,7 @@ import argparse
 import math
 import os
 import sys
+import uuid
 
 import httpx
 
@@ -41,6 +50,11 @@ def parse_args() -> argparse.Namespace:
         help="Merchant UUID to shop against (or set the MERCHANT_ID env var).",
     )
     parser.add_argument(
+        "--api-key",
+        default=os.environ.get("AGENT_API_KEY"),
+        help="Agent API key for the X-Agent-Api-Key header (or set the AGENT_API_KEY env var).",
+    )
+    parser.add_argument(
         "--base-url",
         default=os.environ.get("BASE_URL", "http://localhost:8000"),
         help="Backend base URL (or set the BASE_URL env var). Default: http://localhost:8000",
@@ -50,6 +64,11 @@ def parse_args() -> argparse.Namespace:
         parser.error(
             "--merchant-id is required (or set the MERCHANT_ID env var). "
             "Get one from POST /merchant/onboarding/keys or the /onboarding dashboard page."
+        )
+    if not args.api_key:
+        parser.error(
+            "--api-key is required (or set the AGENT_API_KEY env var). It's returned once, "
+            "at onboarding time, from POST /merchant/onboarding/keys — never shown again."
         )
     return args
 
@@ -66,7 +85,9 @@ def _error_detail(resp: httpx.Response) -> str:
 def main() -> int:
     args = parse_args()
     api = f"{args.base_url.rstrip('/')}/api/v1"
-    client = httpx.Client(timeout=30.0)
+    # X-Agent-Api-Key applies to every call via the client default; Idempotency-Key
+    # is per-checkout-attempt, so it's set explicitly on each POST /agent/checkout below.
+    client = httpx.Client(timeout=30.0, headers={"X-Agent-Api-Key": args.api_key})
 
     print(f"🤖 AI buyer agent starting up — merchant_id={args.merchant_id}, backend={args.base_url}\n")
 
@@ -107,7 +128,9 @@ def main() -> int:
         "cart_items": [{"product_id": product["id"], "quantity": 1}],
         "customer_context": {"customer_id": "demo-buyer-agent"},
     }
-    resp = client.post(f"{api}/agent/checkout", json=payload)
+    idempotency_key = str(uuid.uuid4())
+    print(f"   Idempotency-Key: {idempotency_key}")
+    resp = client.post(f"{api}/agent/checkout", json=payload, headers={"Idempotency-Key": idempotency_key})
     if resp.status_code < 400:
         order = resp.json()
         print(f"✅ Order created: {order.get('razorpayOrderId')} — {order.get('amount')} {order.get('currency')}")
@@ -136,7 +159,11 @@ def main() -> int:
         "cart_items": [{"product_id": product["id"], "quantity": over_budget_qty}],
         "customer_context": {"customer_id": "demo-buyer-agent"},
     }
-    resp = client.post(f"{api}/agent/checkout", json=bad_payload)
+    bad_idempotency_key = str(uuid.uuid4())
+    print(f"   Idempotency-Key: {bad_idempotency_key}")
+    resp = client.post(
+        f"{api}/agent/checkout", json=bad_payload, headers={"Idempotency-Key": bad_idempotency_key}
+    )
     if resp.status_code >= 400:
         print(f"❌ Denied ({resp.status_code}): {_error_detail(resp)}")
     else:

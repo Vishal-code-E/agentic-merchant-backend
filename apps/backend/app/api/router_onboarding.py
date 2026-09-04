@@ -8,6 +8,7 @@ from app.models.merchant import Merchant
 from app.models.policy import Policy
 from app.schemas.merchant import MerchantResponse, OnboardMerchantRequest, OnboardMerchantResponse
 from app.schemas.policy import PolicyResponse
+from app.services.agent_auth import generate_api_key, hash_api_key
 from app.services.encryption import encrypt_secret
 from app.services.razorpay_client import RazorpayClient
 
@@ -20,23 +21,33 @@ async def set_razorpay_keys(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Store + validate a merchant's Razorpay test-mode keys, and create the
-    merchant's Policy row in the same transaction.
+    Store + validate a merchant's Razorpay test-mode keys, create the
+    merchant's Policy row, and issue an agent API key — all in the same
+    transaction.
 
     A Merchant without a Policy is not a valid state: check_policy_node fails
     closed on a missing policy, so a half-written merchant would be permanently
-    un-checkout-able. Both rows are added to the same session and flushed once;
+    un-checkout-able. All rows are added to the same session and flushed once;
     get_db() commits only after this handler returns, and rolls back on any
-    exception, so a failure on either INSERT persists neither.
+    exception, so a failure on any INSERT persists none of them.
+
+    The plaintext agent API key exists only in this function's local variable
+    and in the response below — only its sha256 hash is ever persisted (see
+    app/services/agent_auth.py) — so it cannot be recovered if the caller
+    loses it; they would need to re-onboard (or a future key-rotation
+    endpoint) to get a new one.
     """
     client = RazorpayClient(payload.razorpay_key_id, payload.razorpay_key_secret)
     keys_valid = await client.validate_keys()
+
+    api_key = generate_api_key()
 
     merchant = Merchant(
         name=payload.name,
         razorpay_key_id=payload.razorpay_key_id,
         razorpay_key_secret=encrypt_secret(payload.razorpay_key_secret),
         status="active" if keys_valid else "pending",
+        api_key_hash=hash_api_key(api_key),
     )
     db.add(merchant)
 
@@ -60,6 +71,7 @@ async def set_razorpay_keys(
         merchant=MerchantResponse.model_validate(merchant),
         policy=PolicyResponse.model_validate(policy),
         keys_valid=keys_valid,
+        api_key=api_key,
     )
 
 

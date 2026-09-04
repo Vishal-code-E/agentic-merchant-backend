@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,6 +8,7 @@ from app.db.session import get_db
 from app.models.merchant import Merchant
 from app.models.product import Product
 from app.schemas.product import AgentCatalogItem, ProductCreate, ProductResponse, ProductUpdate
+from app.services.agent_auth import verify_agent_api_key
 
 router = APIRouter(tags=["catalog"])
 
@@ -61,9 +62,12 @@ async def agent_catalog(
     merchant_id: uuid.UUID,
     category: str | None = None,
     max_price: float | None = None,
+    x_agent_api_key: str | None = Header(default=None, alias="X-Agent-Api-Key"),
     db: AsyncSession = Depends(get_db),
 ):
     """Agent-readable catalog endpoint: flat JSON array, no nested objects."""
+    await verify_agent_api_key(merchant_id, x_agent_api_key, db)
+
     query = select(Product).where(Product.merchant_id == merchant_id)
     if category is not None:
         query = query.where(Product.category == category)

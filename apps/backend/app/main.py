@@ -10,6 +10,7 @@ from app.api import (
     router_campaigns,
     router_catalog,
     router_checkout,
+    router_manifest,
     router_observability,
     router_onboarding,
     router_policy,
@@ -70,6 +71,10 @@ async def health_db():
         await conn.execute(text("SELECT 1"))
     return {"status": "ok"}
 
+
+# No prefix: an agent discovers this at the well-known path regardless of
+# api_v1_prefix, and it must be reachable before the caller has an API key.
+app.include_router(router_manifest.router)
 
 # Registration order matters: FastAPI/Starlette matches routes in the order
 # they were added, with no static-vs-dynamic specificity scoring. router_catalog's

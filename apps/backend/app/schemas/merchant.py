@@ -33,3 +33,8 @@ class OnboardMerchantResponse(BaseModel):
     merchant: MerchantResponse
     policy: PolicyResponse
     keys_valid: bool
+    # Plaintext agent API key — returned exactly once, here, same pattern as
+    # Razorpay's own key_secret being shown once on the Razorpay dashboard.
+    # Never stored in plaintext (see Merchant.api_key_hash) and never
+    # returned by any other endpoint, including GET /merchant/{merchant_id}.
+    api_key: str

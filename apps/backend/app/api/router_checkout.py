@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from langfuse import observe, propagate_attributes
 from razorpay.errors import BadRequestError, GatewayError, ServerError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +13,7 @@ from app.models.agent_run import AgentRun
 from app.observability.langfuse_client import get_langfuse_client, get_langfuse_handler
 from app.schemas.checkout import CheckoutRequest, CheckoutResponse
 from app.schemas.product import ProductResponse
+from app.services.agent_auth import verify_agent_api_key
 from app.services.audit_service import AuditService
 
 router = APIRouter(tags=["checkout"])
@@ -42,10 +43,29 @@ langfuse = get_langfuse_client()
 
 @router.post("/agent/checkout", response_model=CheckoutResponse)
 @observe(capture_input=False, capture_output=False)
-async def agent_checkout(payload: CheckoutRequest, db: AsyncSession = Depends(get_db)):
+async def agent_checkout(
+    payload: CheckoutRequest,
+    x_agent_api_key: str | None = Header(default=None, alias="X-Agent-Api-Key"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    db: AsyncSession = Depends(get_db),
+):
     """
     Accepts a structured cart request from an external AI agent, runs
     checkout_graph, returns order details + explanation.
+
+    Two preconditions are checked before any tracing/AgentRun/graph work
+    starts, and both reject with a plain HTTPException rather than FastAPI's
+    default validation-error handling for a missing header (which would be a
+    422, not the status callers should key retry logic off of here):
+
+    - X-Agent-Api-Key must match this merchant's stored key (401) — see
+      app/services/agent_auth.py.
+    - Idempotency-Key must be present (400) — declared as an optional Header
+      here specifically so its absence can be turned into a 400 instead of
+      FastAPI's automatic 422. create_order_node uses it to detect a retried
+      request and return the original order instead of creating a second one
+      or calling Razorpay again (true idempotency, not just receipt-based
+      hope — see that node's docstring).
 
     capture_input/output are disabled on @observe() and set explicitly below
     instead — the default would otherwise dump every function arg, including
@@ -67,6 +87,18 @@ async def agent_checkout(payload: CheckoutRequest, db: AsyncSession = Depends(ge
     that a session groups multiple *related* traces, and a single checkout
     call has nothing to group with unless we know which customer it's for.
     """
+    await verify_agent_api_key(payload.merchant_id, x_agent_api_key, db)
+
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Missing required Idempotency-Key header. Supply a unique key per checkout "
+                "attempt — retrying with the same key returns the original order instead of "
+                "creating a duplicate."
+            ),
+        )
+
     trace_id = langfuse.get_current_trace_id()
     customer_id = (payload.customer_context or {}).get("customer_id")
 
@@ -101,6 +133,7 @@ async def agent_checkout(payload: CheckoutRequest, db: AsyncSession = Depends(ge
             "customer_context": payload.customer_context,
             "cart_items": [item.model_dump() for item in payload.cart_items],
             "agent_run_id": str(agent_run.id),
+            "idempotency_key": idempotency_key,
         }
 
         graph = build_checkout_graph(db)

@@ -29,14 +29,28 @@ export default function OnboardingPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<OnboardMerchantResponse | null>(null);
+  const [copied, setCopied] = useState(false);
 
   function update<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
   }
 
+  async function handleCopyApiKey() {
+    if (!result) return;
+    try {
+      await navigator.clipboard.writeText(result.api_key);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard API unavailable (non-secure context, permission denied, etc.) —
+      // the key below is still selectable text, so this is a soft failure.
+    }
+  }
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
+    setCopied(false);
     setSubmitting(true);
 
     const payload: OnboardMerchantRequest = {
@@ -73,17 +87,46 @@ export default function OnboardingPage() {
       {error && <div className="banner banner-error">{error}</div>}
 
       {result && (
-        <div className="banner banner-success">
-          <strong>Merchant onboarded.</strong> merchant_id:{" "}
-          <code>{result.merchant.id}</code> is now the active merchant for the rest of this
-          dashboard.
-          {!result.keys_valid && (
-            <div style={{ marginTop: 4 }}>
-              Note: Razorpay key validation failed — the merchant was created with status{" "}
-              <code>{result.merchant.status}</code>.
+        <>
+          <div className="banner banner-success">
+            <strong>Merchant onboarded.</strong> merchant_id:{" "}
+            <code>{result.merchant.id}</code> is now the active merchant for the rest of this
+            dashboard.
+            {!result.keys_valid && (
+              <div style={{ marginTop: 4 }}>
+                Note: Razorpay key validation failed — the merchant was created with status{" "}
+                <code>{result.merchant.status}</code>.
+              </div>
+            )}
+          </div>
+
+          <div className="banner banner-warning">
+            <strong>Copy this API key now — it will not be shown again.</strong>
+            <div className="hint" style={{ marginTop: 4, marginBottom: 8 }}>
+              Send it as the <code>X-Agent-Api-Key</code> header on <code>/agent/catalog</code> and{" "}
+              <code>/agent/checkout</code> calls. If you lose it, the only way to get a new one is
+              to re-onboard this merchant.
             </div>
-          )}
-        </div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <code
+                style={{
+                  flex: 1,
+                  padding: "8px 10px",
+                  background: "var(--color-surface)",
+                  border: "1px solid var(--color-warning-border)",
+                  borderRadius: 6,
+                  userSelect: "all",
+                  wordBreak: "break-all",
+                }}
+              >
+                {result.api_key}
+              </code>
+              <button type="button" className="btn-secondary" onClick={handleCopyApiKey}>
+                {copied ? "Copied!" : "Copy"}
+              </button>
+            </div>
+          </div>
+        </>
       )}
 
       <form className="card" onSubmit={handleSubmit}>
