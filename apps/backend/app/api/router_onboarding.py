@@ -6,7 +6,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
 from app.models.merchant import Merchant
 from app.models.policy import Policy
-from app.schemas.merchant import MerchantResponse, OnboardMerchantRequest, OnboardMerchantResponse
+from app.schemas.merchant import (
+    MerchantResponse,
+    OnboardMerchantRequest,
+    OnboardMerchantResponse,
+    RegenerateApiKeyResponse,
+)
 from app.schemas.policy import PolicyResponse
 from app.services.agent_auth import generate_api_key, hash_api_key
 from app.services.encryption import encrypt_secret
@@ -73,6 +78,20 @@ async def set_razorpay_keys(
         keys_valid=keys_valid,
         api_key=api_key,
     )
+
+
+@router.post("/merchant/{merchant_id}/api-key/regenerate", response_model=RegenerateApiKeyResponse)
+async def regenerate_api_key(merchant_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Issue a new agent API key for an existing merchant, invalidating the old one immediately."""
+    merchant = await db.get(Merchant, merchant_id)
+    if merchant is None:
+        raise HTTPException(status_code=404, detail="Merchant not found")
+
+    api_key = generate_api_key()
+    merchant.api_key_hash = hash_api_key(api_key)
+    await db.flush()
+
+    return RegenerateApiKeyResponse(merchant_id=merchant.id, api_key=api_key)
 
 
 @router.get("/merchant/{merchant_id}", response_model=MerchantResponse)

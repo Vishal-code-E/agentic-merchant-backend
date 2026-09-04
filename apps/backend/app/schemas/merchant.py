@@ -38,3 +38,10 @@ class OnboardMerchantResponse(BaseModel):
     # Never stored in plaintext (see Merchant.api_key_hash) and never
     # returned by any other endpoint, including GET /merchant/{merchant_id}.
     api_key: str
+
+
+class RegenerateApiKeyResponse(BaseModel):
+    merchant_id: uuid.UUID
+    # Plaintext — same one-time-only contract as OnboardMerchantResponse.api_key.
+    # Invalidates the merchant's previous key immediately.
+    api_key: str

@@ -97,10 +97,11 @@ async def agent_manifest() -> dict:
             "header": "Idempotency-Key",
             "required_on": [f"POST {prefix}/agent/checkout"],
             "description": (
-                "A caller-generated unique string per checkout attempt. Retrying the same "
-                "logical checkout with the same key returns the original order instead of "
-                "creating a duplicate order or double-charging. A request with a missing "
-                "header gets a 400."
+                "A caller-generated unique string per checkout attempt, unique per merchant. "
+                "Retrying the same logical checkout with the same key and the same cart "
+                "returns the original order instead of creating a duplicate order or "
+                "double-charging. A missing or empty header gets a 400; reusing a key with a "
+                "different cart gets a 409."
             ),
         },
         "docs": "/docs",

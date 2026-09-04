@@ -83,6 +83,16 @@ export interface OnboardMerchantResponse {
 }
 
 /**
+ * Response for POST /merchant/{merchant_id}/api-key/regenerate. Invalidates
+ * the merchant's previous key immediately; same one-time-display contract as
+ * OnboardMerchantResponse.api_key.
+ */
+export interface RegenerateApiKeyResponse {
+  merchant_id: string;
+  api_key: string;
+}
+
+/**
  * Required on every /agent/* call (GET /agent/catalog, POST /agent/checkout).
  * Value is OnboardMerchantResponse.api_key. A missing/invalid key gets a 401.
  */

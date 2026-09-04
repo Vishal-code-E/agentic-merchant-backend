@@ -29,6 +29,7 @@ FAILURE_STAGE_STATUS = {
     "policy": 403,
     "policy_missing": 409,
     "create_order": 400,
+    "idempotency_conflict": 409,
 }
 
 #: failure_stage values that mean "refused at the policy gate" rather than

@@ -11,6 +11,7 @@ import uuid
 
 from langgraph.graph import END, StateGraph
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.state import CheckoutState
@@ -253,52 +254,75 @@ async def check_policy_node(state: CheckoutState, db: AsyncSession) -> CheckoutS
     return state
 
 
-async def create_order_node(state: CheckoutState, db: AsyncSession) -> CheckoutState:
-    """
-    True idempotency check first: if an Order already exists for this
-    merchant_id + idempotency_key, return its result verbatim instead of
-    creating a new one or calling Razorpay again. This is stronger than the
-    receipt=str(order.id) passed to Razorpay below, which only makes
-    Razorpay's own order creation idempotent on Razorpay's side — it does
-    nothing to stop a second local Order row (and a second real charge) if
-    the caller retries before this request ever reaches Razorpay.
+def _cart_signature(cart_items: list[dict]) -> list[tuple[str, int]]:
+    """Order-independent (product_id, quantity) fingerprint used to detect an idempotency-key/cart mismatch."""
+    return sorted((item["product_id"], item["quantity"]) for item in cart_items)
 
-    Otherwise: create a local Order row, then call RazorpayClient.create_order()
-    using the Order's own id as the receipt. Razorpay SDK errors are left to
-    propagate so the router can map them to a 502 — but are audited
-    (event_type="razorpay_order_failed") before they're re-raised.
-    """
-    merchant_id = uuid.UUID(state["merchant_id"])
-    idempotency_key = state["idempotency_key"]
 
-    existing = await db.execute(
+async def _fetch_order_by_idempotency_key(
+    db: AsyncSession, merchant_id: uuid.UUID, idempotency_key: str
+) -> Order | None:
+    result = await db.execute(
         select(Order)
         .where(Order.merchant_id == merchant_id, Order.idempotency_key == idempotency_key)
         .limit(1)
     )
-    existing_order = existing.scalars().first()
-    if existing_order is not None:
+    return result.scalars().first()
+
+
+async def _resolve_idempotent_replay(
+    db: AsyncSession, state: CheckoutState, existing_order: Order, cart_items: list[dict]
+) -> CheckoutState:
+    """Return the prior order verbatim only if the cart matches the key's original cart; otherwise 409."""
+    idempotency_key = state["idempotency_key"]
+    existing_items = (existing_order.cart_snapshot or {}).get("items") or []
+
+    if _cart_signature(cart_items) != _cart_signature(existing_items):
         await AuditService(db).log_event(
             agent_run_id=state.get("agent_run_id"),
-            event_type="checkout_idempotent_replay",
-            payload={"order_id": str(existing_order.id), "idempotency_key": idempotency_key},
+            event_type="checkout_idempotency_conflict",
+            payload={"idempotency_key": idempotency_key, "existing_order_id": str(existing_order.id)},
         )
-        state["order_id"] = str(existing_order.id)
-        state["razorpay_order_id"] = existing_order.razorpay_order_id
-        state["amount"] = float(existing_order.amount)
-        state["currency"] = existing_order.currency
-        if existing_order.status == "success":
-            state["status"] = "success"
-        else:
-            # Original attempt failed before ever reaching Razorpay (or Razorpay
-            # itself errored) — don't retry it silently on the caller's behalf.
-            state["status"] = "failed"
-            state["failure_stage"] = "create_order"
-            state["explanation"] = (
-                f"Idempotency-Key {idempotency_key!r} matches a previously failed order; "
-                "not retrying automatically. Use a new Idempotency-Key to retry."
-            )
+        state["status"] = "failed"
+        state["failure_stage"] = "idempotency_conflict"
+        state["explanation"] = (
+            f"Idempotency-Key {idempotency_key!r} was already used for a different cart. "
+            "Use a new Idempotency-Key for a different checkout request."
+        )
         return state
+
+    await AuditService(db).log_event(
+        agent_run_id=state.get("agent_run_id"),
+        event_type="checkout_idempotent_replay",
+        payload={"order_id": str(existing_order.id), "idempotency_key": idempotency_key},
+    )
+    state["order_id"] = str(existing_order.id)
+    state["razorpay_order_id"] = existing_order.razorpay_order_id
+    state["amount"] = float(existing_order.amount)
+    state["currency"] = existing_order.currency
+    if existing_order.status == "success":
+        state["status"] = "success"
+    else:
+        # Original attempt failed before ever reaching Razorpay (or Razorpay
+        # itself errored) — don't retry it silently on the caller's behalf.
+        state["status"] = "failed"
+        state["failure_stage"] = "create_order"
+        state["explanation"] = (
+            f"Idempotency-Key {idempotency_key!r} matches a previously failed order; "
+            "not retrying automatically. Use a new Idempotency-Key to retry."
+        )
+    return state
+
+
+async def create_order_node(state: CheckoutState, db: AsyncSession) -> CheckoutState:
+    """SELECT existing order by idempotency key first, then INSERT ... ON CONFLICT DO NOTHING to close the race atomically (a Session.begin_nested() SAVEPOINT doesn't reliably survive a failed flush() on this SQLAlchemy version)."""
+    merchant_id = uuid.UUID(state["merchant_id"])
+    idempotency_key = state["idempotency_key"]
+    cart_items = state.get("cart_items") or []
+
+    existing_order = await _fetch_order_by_idempotency_key(db, merchant_id, idempotency_key)
+    if existing_order is not None:
+        return await _resolve_idempotent_replay(db, state, existing_order, cart_items)
 
     merchant = await db.get(Merchant, merchant_id)
     if merchant is None:
@@ -310,17 +334,32 @@ async def create_order_node(state: CheckoutState, db: AsyncSession) -> CheckoutS
     amount = state.get("amount") or 0.0
     currency = state.get("currency") or "INR"
 
-    order = Order(
-        merchant_id=merchant.id,
-        status="pending",
-        amount=amount,
-        currency=currency,
-        cart_snapshot={"items": state.get("cart_items", [])},
-        idempotency_key=idempotency_key,
+    insert_stmt = (
+        pg_insert(Order)
+        .values(
+            id=uuid.uuid4(),
+            merchant_id=merchant.id,
+            status="pending",
+            amount=amount,
+            currency=currency,
+            cart_snapshot={"items": cart_items},
+            idempotency_key=idempotency_key,
+        )
+        .on_conflict_do_nothing(index_elements=["merchant_id", "idempotency_key"])
+        .returning(Order)
     )
-    db.add(order)
-    await db.flush()
-    await db.refresh(order)
+    order = (await db.execute(insert_stmt)).scalars().one_or_none()
+
+    if order is None:
+        # Lost the race: another request's INSERT won between our SELECT above
+        # and this INSERT. Its row is now committed-or-committing; replay it.
+        existing_order = await _fetch_order_by_idempotency_key(db, merchant_id, idempotency_key)
+        if existing_order is None:
+            raise RuntimeError(
+                f"ON CONFLICT DO NOTHING fired for idempotency_key={idempotency_key!r} "
+                "but no matching order was found."
+            )
+        return await _resolve_idempotent_replay(db, state, existing_order, cart_items)
 
     audit_service = AuditService(db)
     client = RazorpayClient(merchant.razorpay_key_id, decrypt_secret(merchant.razorpay_key_secret))
